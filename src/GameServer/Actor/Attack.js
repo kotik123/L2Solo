@@ -13,6 +13,10 @@ const ChargeLifecycle = invoke('GameServer/Skills/ChargeLifecycle');
 const AttackRange = invoke('GameServer/Actor/AttackRange');
 const HotPartyCastTracker = invoke('GameServer/Bot/AI/HotPartyCastTracker');
 
+// L2J C4: bow shot = 1500*345/atkSpd, reload = atk_reuse*345/atkSpd
+const BOW_BASE_SHOT_MS  = 1500;
+const BOW_DEFAULT_REUSE = 1500; // no atk_reuse in the item data yet, so one value for all bows
+
 const { weaponMaskFor } = invoke('GameServer/Skills/WeaponMask');
 
 class Attack {
@@ -96,6 +100,13 @@ class Attack {
     meleeHit(session, creature) {
         if (session?.pvpHandoffPending) return;
         const actor = session.actor;
+		
+		 // bow still reloading: wait out the rest without blocking movement
+        const bowWait = (actor.bowReadyAt || 0) - Date.now();
+        if (bowWait > 0 && AttackRange.weaponKind(actor) === 'Weapon.Bow') {
+            this.scheduleBowShot(session, actor, creature, bowWait);
+            return;
+        }
 
         if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
             return;
@@ -135,7 +146,10 @@ class Attack {
             }, autoSoulshotId);
         }
 
-        const speed = Formulas.calcMeleeAtkTime(actor.fetchCollectiveAtkSpd());
+        const bow = rangedAttack ? this.bowTimings(actor) : null;
+        const speed = bow ? bow.shot : Formulas.calcMeleeAtkTime(actor.fetchCollectiveAtkSpd());
+        const hitDelay = bow ? bow.shot : speed * 0.644;           // bow: damage lands when the arrow arrives
+        const cycle = bow ? bow.shot + bow.reuse : speed;          // bow: shot + reload
         let secondaryDamageMultiplier = 0.85;
         const hits = this.resolveMeleeTargets(actor, creature).map((target, index) => {
             const hitLanded = Formulas.calcHitChance(actor, target, Math.random, this.positionContext(actor, target));
@@ -161,6 +175,12 @@ class Attack {
             }))
         }), actor);
         actor.state.setHits(true);
+		
+        if (bow) {
+            actor.bowReadyAt = Date.now() + cycle;                                 // <-- new
+            session.dataSendToMe?.(ServerResponse.systemMessage(41));
+            session.dataSendToMe?.(ServerResponse.skillDurationBar(cycle, 1));
+        }
 
         this.queueTimer(() => {
             if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
@@ -194,26 +214,31 @@ class Attack {
                 }
             });
 
-        }, speed * 0.644); // Until hit point
+         }, hitDelay); // Until hit point
 
         this.queueTimer(() => {
             if (this.blockedPvpDefense(session, actor, creature) || this.checkParticipants(actor, creature)) {
                 return;
             }
 
-            actor.state.setHits(false);
+            actor.state.setHits(false);   // shot finished: movement allowed again
             if (invoke('GameServer/Bot/AI/PartyCompanionService').startQueuedGroundPickup(session)) {
                 return;
             }
 
-            if (this.queue.name) {
+            if (this.queue.name) {        // e.g. a move click during the shot: run it now
                 this.dequeueEvent(session);
+                return;
+            }
+
+            if (bow) {                    // bow: next arrow after the reload, unless the player ran off
+                this.scheduleBowShot(session, actor, creature, bow.reuse);
                 return;
             }
 
             this.meleeHit(session, creature);
 
-        }, speed); // Until end of combat move
+        }, bow ? bow.shot : speed); // Until end of combat move
     }
 
     remoteHit(session, creature, skill) {
@@ -1106,6 +1131,29 @@ class Attack {
             behind,
             front: !behind && this.isFacing(target, attacker, 120)
         };
+    }
+	
+	bowTimings(actor) {
+        const atkSpd = Math.max(1, Number(actor.fetchCollectiveAtkSpd()) || 1);
+        return {
+            shot:  Math.floor(BOW_BASE_SHOT_MS  * 345 / atkSpd),
+            reuse: Math.floor(BOW_DEFAULT_REUSE * 345 / atkSpd)
+        };
+    }
+	
+	 scheduleBowShot(session, actor, creature, delay) {
+        if (this.bowTimer) {
+            clearTimeout(this.bowTimer);
+            this.timers.delete(this.bowTimer);
+        }
+        const x = actor.fetchLocX?.();
+        const y = actor.fetchLocY?.();
+        this.bowTimer = this.queueTimer(() => {
+            this.bowTimer = null;
+            // the player moved during the reload (kiting): stop auto-attack, wait for a new click
+            if (actor.fetchLocX?.() !== x || actor.fetchLocY?.() !== y) return;
+            this.meleeHit(session, creature);
+        }, Math.max(0, delay));
     }
 
     isBowAttack(creature) {
