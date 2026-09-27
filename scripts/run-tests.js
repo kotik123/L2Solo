@@ -188,6 +188,7 @@ const tests = [
     'tests/test_llm_configured_supply_store.js',
     'tests/test_afk_trade_database.js',
     'tests/test_market_trade_history.js',
+    'tests/test_observer_market_model.js',
     'tests/test_afk_trade_service.js',
     'tests/test_afk_trade_bot_matching.js',
     'tests/test_trade_store_atomicity.js',
