@@ -475,6 +475,7 @@ const tests = [
     'tests/test_multi_launcher_isolation.js',
     'tests/test_world_wipe.js',
     'tests/test_macros.js',
+    'tests/test_henna.js',
     'tests/test_npc_combat_range.js',
     'tests/test_npc_skill_selection.js',
     'tests/test_npc_offensive_targets.js',

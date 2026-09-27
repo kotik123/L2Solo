@@ -257,6 +257,13 @@ class Backpack extends BackpackModel {
                     return;
                 }
 
+                // Tattoo dyes open the class symbol window, mirroring the RequestHennaList flow.
+                const HennaService = invoke('GameServer/Henna/HennaService');
+                if (HennaService.isTattooDye(item.fetchSelfId())) {
+                    HennaService.sendHennaList(session);
+                    return;
+                }
+
                 utils.infoWarn('GameServer', 'unhandled item action');
             }
         });

@@ -12,7 +12,7 @@
                 },
                 {
                     "type": "string",
-                    "pattern": "^((armor|weapon):(none|d|c|b|a|s)|pet:(food|equipment|summons))$"
+                    "pattern": "^((armor|weapon):(none|d|c|b|a|s)|pet:(food|equipment|summons)|tattoo:dyes)$"
                 }
             ]
         }

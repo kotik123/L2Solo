@@ -1173,6 +1173,12 @@ function applySchemaMigrations() {
         if (!columns.includes('newbie')) connection.exec('ALTER TABLE characters ADD COLUMN newbie INTEGER NOT NULL DEFAULT -1');
         if (!columns.includes('newbieShotsReceived')) connection.exec('ALTER TABLE characters ADD COLUMN newbieShotsReceived INTEGER NOT NULL DEFAULT 0');
     }]);
+    migrations.push([48, () => connection.exec(`CREATE TABLE IF NOT EXISTS character_hennas (
+        characterId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+        slot INTEGER NOT NULL,
+        symbolId INTEGER NOT NULL,
+        PRIMARY KEY(characterId, slot)
+    )`)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -7178,6 +7184,10 @@ const Database = {
     deleteMacro(characterId, macroId) { return remove('macros', 'characterId = ? AND id = ?', [characterId, macroId], 'macro:delete'); },
     deleteMacros(characterId) { return remove('macros', 'characterId = ?', [characterId], 'macro:delete-all'); },
     deleteMacroShortcuts(characterId, macroId) { return remove('shortcuts', 'characterId = ? AND kind = 4 AND id = ?', [characterId, macroId], 'shortcut:delete-macro'); },
+    setCharacterHenna(characterId, slot, symbolId) { return withCharacterFlush(characterId, () => run(`INSERT INTO character_hennas (characterId, slot, symbolId) VALUES (?, ?, ?)
+        ON CONFLICT(characterId, slot) DO UPDATE SET symbolId = excluded.symbolId`, [characterId, slot, symbolId], 'henna:upsert')); },
+    fetchCharacterHennas(characterId) { return select('character_hennas', ['*'], 'characterId = ?', [characterId], 'henna:list'); },
+    deleteCharacterHenna(characterId, slot) { return withCharacterFlush(characterId, () => remove('character_hennas', 'slot = ? AND characterId = ?', [slot, characterId], 'henna:delete')); },
     updateCharacterLocation(id, coords) { return withCharacterFlush(id, () => update('characters', { locX: coords.locX, locY: coords.locY, locZ: coords.locZ, head: coords.head ?? -1 }, 'id = ?', [id], 'character:location')); },
     updateCharacterName(id, name) { return withCharacterFlush(id, () => update('characters', { name }, 'id = ?', [id], 'character:name')); },
     updateGeneratedBotName(id, name, version) {
