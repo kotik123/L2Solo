@@ -5,6 +5,7 @@ const path = require('path');
 require('../src/Global');
 
 const Database = invoke('Database');
+const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-market-trade-history.sqlite');
 
 function clean() {
@@ -47,6 +48,8 @@ function clean() {
     });
 
     const overview = await Database.fetchMarketTradeOverview({ timestamp });
+    const workerOverview = await MarketTradeOverviewReader.read(databasePath, { timestamp });
+    assert.deepStrictEqual(workerOverview, overview, 'read-only worker must return the same persistent market overview');
     assert.strictEqual(overview.scope, 'persistent_90d');
     assert.deepStrictEqual(overview.windows.day, {
         trades: 3, units: 7, adena: 500, items: 2,

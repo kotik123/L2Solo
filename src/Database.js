@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const Statements = require('./DatabaseStatements');
+const MarketTradeOverview = require('./MarketTradeOverview');
 const CheckpointCoordinator = require('./DatabaseCheckpointCoordinator');
 const { XP_DIVIDER: KARMA_XP_DIVIDER } = require('./GameServer/Karma');
 const InteractionMemoryPolicy = require('./GameServer/Social/InteractionMemoryPolicy');
@@ -1245,30 +1246,6 @@ function jsonArray(raw) {
     }
 }
 
-function marketTradeRow(row = {}) {
-    return {
-        id: Number(row.id || 0),
-        eventKey: String(row.eventKey || ''),
-        at: Number(row.occurredAt || 0),
-        channel: String(row.channel || ''),
-        sourceType: String(row.sourceType || ''),
-        selfId: Number(row.selfId || 0),
-        itemName: String(row.itemName || ''),
-        quantity: Number(row.quantity || 0),
-        unitPrice: Number(row.unitPrice || 0),
-        adena: Number(row.totalPrice || 0),
-        town: row.town || null,
-        seller: {
-            characterId: Number(row.sellerCharacterId || 0) || null,
-            name: row.sellerName || null
-        },
-        buyer: {
-            characterId: Number(row.buyerCharacterId || 0) || null,
-            name: row.buyerName || null
-        }
-    };
-}
-
 function marketTradeAggregate(since, { selfId = null, to = null } = {}) {
     const where = ['occurredAt >= ?'];
     const params = [Number(since)];
@@ -2326,47 +2303,8 @@ const Database = {
     },
 
     fetchMarketTradeOverview({ timestamp = now(), recentLimit = 200 } = {}) {
-        const current = Math.max(1, Number(timestamp) || now());
-        const limit = Math.max(1, Math.min(500, Math.floor(Number(recentLimit) || 200)));
-        const dayAgo = current - 24 * 60 * 60 * 1000;
-        const weekAgo = current - 7 * 24 * 60 * 60 * 1000;
-        return enqueue(() => {
-            const recent = all(`SELECT * FROM market_trades
-                ORDER BY occurredAt DESC, id DESC LIMIT ${limit}`).map(marketTradeRow);
-            const byItem = all(`SELECT selfId, MAX(itemName) AS name, COUNT(*) AS trades,
-                COALESCE(SUM(quantity), 0) AS items, COALESCE(SUM(totalPrice), 0) AS adena,
-                MAX(occurredAt) AS lastTradeAt
-                FROM market_trades WHERE occurredAt >= ?
-                GROUP BY selfId ORDER BY adena DESC, items DESC, selfId ASC`, [weekAgo])
-                .map((row) => ({
-                    selfId: Number(row.selfId),
-                    name: row.name || `Item ${row.selfId}`,
-                    trades: Number(row.trades || 0),
-                    items: Number(row.items || 0),
-                    adena: Number(row.adena || 0),
-                    lastTradeAt: Number(row.lastTradeAt || 0) || null
-                }));
-            const byTown = Object.fromEntries(all(`SELECT COALESCE(town, 'Unknown') AS town,
-                COUNT(*) AS trades, COALESCE(SUM(quantity), 0) AS items,
-                COALESCE(SUM(totalPrice), 0) AS adena
-                FROM market_trades WHERE occurredAt >= ?
-                GROUP BY COALESCE(town, 'Unknown') ORDER BY adena DESC`, [weekAgo]).map((row) => [row.town, {
-                trades: Number(row.trades || 0),
-                items: Number(row.items || 0),
-                adena: Number(row.adena || 0)
-            }]));
-            return {
-                scope: 'persistent_90d',
-                retentionDays: 90,
-                windows: {
-                    day: marketTradeAggregate(dayAgo),
-                    week: marketTradeAggregate(weekAgo)
-                },
-                recent,
-                byItem,
-                byTown
-            };
-        }, { operation: 'market:trade-overview', read: true });
+        return enqueue(() => MarketTradeOverview.fetch(all, { timestamp, recentLimit }),
+            { operation: 'market:trade-overview', read: true });
     },
 
     fetchMarketTradeHistory(selfId, { timestamp = now(), rangeMs = 24 * 60 * 60 * 1000, bucketMs = 60 * 60 * 1000 } = {}) {

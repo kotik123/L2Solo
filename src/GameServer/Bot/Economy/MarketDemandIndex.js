@@ -38,14 +38,36 @@ function states(options = {}) {
     return options.states || LifeState.allStates(5000);
 }
 
+function indexSignals(allStates, timestamp = Date.now()) {
+    const byItem = new Map();
+    (allStates || []).forEach((state) => {
+        const plan = state?.stats?.equipmentPlan;
+        const ids = new Set([
+            Number(state?.stats?.marketWanted?.itemId || 0),
+            Number(plan?.target?.selfId || 0),
+            ...(plan?.materials || []).map((material) => Number(material?.selfId || 0))
+        ]);
+        ids.forEach((selfId) => {
+            if (selfId <= 0) return;
+            const signal = demandSignal(state, selfId, timestamp);
+            if (!signal) return;
+            if (!byItem.has(selfId)) byItem.set(selfId, []);
+            byItem.get(selfId).push(signal);
+        });
+    });
+    return byItem;
+}
+
 function demandFor(selfId, options = {}) {
     const timestamp = Number(options.now) || Date.now();
     const unitPrice = Math.max(0, Number(options.unitPrice || 0));
     const excludedCharacterId = Number(options.excludeCharacterId || 0);
-    const signals = states(options)
-        .filter((state) => Number(state.characterId) !== excludedCharacterId)
-        .map((state) => demandSignal(state, selfId, timestamp))
-        .filter(Boolean);
+    const signals = options.signals
+        ? options.signals.filter((signal) => Number(signal.characterId) !== excludedCharacterId)
+        : states(options)
+            .filter((state) => Number(state.characterId) !== excludedCharacterId)
+            .map((state) => demandSignal(state, selfId, timestamp))
+            .filter(Boolean);
     const towns = signals.reduce((result, signal) => {
         if (!signal.town) return result;
         result[signal.town] = (result[signal.town] || 0) + signal.amount;
@@ -104,4 +126,4 @@ function snapshot(selfId, options = {}) {
     };
 }
 
-module.exports = { WANTED_TTL_MS, demandFor, demandSignal, snapshot, supplyFor, timestampForWanted };
+module.exports = { WANTED_TTL_MS, demandFor, demandSignal, indexSignals, snapshot, supplyFor, timestampForWanted };

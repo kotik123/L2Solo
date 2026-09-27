@@ -2042,7 +2042,7 @@ async function marketSnapshot() {
     const market = await MarketSnapshot.detail();
     const knowledge = knowledgeBaseService();
     const itemById = new Map(market.items.map((row) => {
-        const detail = knowledge.itemDetail(row.selfId);
+        const detail = knowledge.itemOverview(row.selfId);
         const enriched = {
             ...row,
             name: detail?.name || row.name,
@@ -2050,7 +2050,7 @@ async function marketSnapshot() {
             category: detail?.category || null,
             grade: detail?.grade || null,
             iconUrl: detail?.iconUrl || null,
-            referencePrice: Number(detail?.template?.price || 0) || null
+            referencePrice: Number(detail?.price || 0) || null
         };
         return [Number(row.selfId), enriched];
     }));

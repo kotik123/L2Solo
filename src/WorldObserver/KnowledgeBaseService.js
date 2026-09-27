@@ -464,7 +464,12 @@ function createKnowledgeBaseService({ dataDir, progressionRates, iconFor = null 
         };
     }
 
-    return Object.freeze({ itemDetail, listItems, listNpcs, meta, npcDetail });
+    function itemOverview(id) {
+        const item = load().itemById.get(Number(id));
+        return item ? itemSummary(item, iconFor) : null;
+    }
+
+    return Object.freeze({ itemDetail, itemOverview, listItems, listNpcs, meta, npcDetail });
 }
 
 module.exports = {

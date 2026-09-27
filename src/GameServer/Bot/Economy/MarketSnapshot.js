@@ -5,6 +5,7 @@ const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
 const StaticMerchantPricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
+const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const World = invoke('GameServer/World/World');
 
 function emptyTown() {
@@ -46,6 +47,8 @@ function snapshot() {
     const byTown = {};
     const items = new Map();
     const states = LifeState.allStates(5000);
+    const now = Date.now();
+    const signalsByItem = MarketDemandIndex.indexSignals(states, now);
     const active = states.filter((state) => state.activity === 'merchant' && state.stats?.marketStore);
     active.forEach((state) => {
         const store = state.stats.marketStore;
@@ -71,7 +74,8 @@ function snapshot() {
 
     const rankedItems = Array.from(items.values()).map((item) => {
         const demand = MarketDemandIndex.demandFor(item.selfId, {
-            states,
+            signals: signalsByItem.get(item.selfId) || [],
+            now,
             unitPrice: Number.isFinite(item.minimumWtsPrice) ? item.minimumWtsPrice : 0
         });
         return {
@@ -259,6 +263,7 @@ function demandItemIds(states) {
 
 function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.transactions(), history = null, now = Date.now(), itemsById = cachedItemsById() } = {}) {
     const items = new Map();
+    const signalsByItem = MarketDemandIndex.indexSignals(states, now);
     const ensure = (selfId) => {
         const id = Number(selfId);
         if (!items.has(id)) {
@@ -312,10 +317,15 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
         ...(transactions.recentNpcTrades || [])
     ].sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
     recentTrades.forEach((trade) => ensure(trade.selfId));
+    const lastTradePrices = new Map();
+    recentTrades.forEach((trade) => {
+        const selfId = Number(trade.selfId);
+        if (!lastTradePrices.has(selfId)) lastTradePrices.set(selfId, trade.unitPrice);
+    });
 
     items.forEach((item) => {
         const demand = MarketDemandIndex.demandFor(item.selfId, {
-            states,
+            signals: signalsByItem.get(item.selfId) || [],
             now,
             unitPrice: Number(item.wts.minPrice || 0)
         });
@@ -334,7 +344,7 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
             item.tradedUnits = Number(totals.items || 0);
             item.tradedAdena = Number(totals.adena || 0);
         }
-        item.lastTradePrice = recentTrades.find((trade) => Number(trade.selfId) === item.selfId)?.unitPrice ?? null;
+        item.lastTradePrice = lastTradePrices.get(item.selfId) ?? null;
         item.towns = [...(townSets.get(item.selfId) || [])].sort();
         item.sources = [...(sourceSets.get(item.selfId) || [])].sort();
     });
@@ -389,9 +399,11 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
 async function detail() {
     const itemsById = cachedItemsById();
     const states = LifeState.allStates(5000);
+    const databasePath = Database.stats().path;
     const [afk, history, storeHistory] = await Promise.all([
         Database.fetchAfkTradeShops(null, { activeOnly: true }).catch(() => []),
-        Database.fetchMarketTradeOverview().catch(() => null),
+        (databasePath ? MarketTradeOverviewReader.read(databasePath) : Database.fetchMarketTradeOverview())
+            .catch(() => null),
         Database.fetchMarketStoreHistory().catch(() => null)
     ]);
     const stores = [
