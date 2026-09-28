@@ -2,11 +2,14 @@ const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const DataCache = invoke('GameServer/DataCache');
 const StaticBuyerService = invoke('GameServer/Bot/Economy/StaticBuyerService');
 const DynamicBuyerService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService');
+const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 
 const GLUDIO_D_GRADE_SHARE_PERCENT = 15;
 let rankIndexSource = null;
 let rankIndexSize = -1;
 let rankBySelfId = new Map();
+let kindBySelfId = new Map();
+let materialRanksBySelfId = new Map();
 
 const NO_GRADE_MARKETS = Object.freeze([
     { name: 'Talking Island', locX: -84700, locY: 244200, radius: 12000 },
@@ -43,8 +46,25 @@ function rankOf(item) {
         rankIndexSource = items;
         rankIndexSize = items.length;
         rankBySelfId = new Map(items.map((candidate) => [Number(candidate.selfId), candidate?.etc?.rank || 'none']));
+        kindBySelfId = new Map(items.map((candidate) => [Number(candidate.selfId), candidate?.template?.kind || '']));
+        materialRanksBySelfId = new Map();
+        Object.values(C4RecipeItems.loadRecipeItems()).forEach((recipe) => {
+            const productRank = String(rankBySelfId.get(Number(recipe.productId)) || 'none').toLowerCase();
+            (recipe.materials || []).forEach((material) => {
+                const id = Number(material.selfId);
+                if (!materialRanksBySelfId.has(id)) materialRanksBySelfId.set(id, new Set());
+                materialRanksBySelfId.get(id).add(productRank);
+            });
+        });
     }
-    return String(item?.rank || rankBySelfId.get(selfId) || 'none').toLowerCase();
+    const directRank = String(item?.rank || rankBySelfId.get(selfId) || 'none').toLowerCase();
+    if (directRank !== 'none') return directRank;
+    const kind = String(item?.kind || kindBySelfId.get(selfId) || '');
+    if (!kind.startsWith('Other.Material')) return directRank;
+    const productRanks = materialRanksBySelfId.get(selfId);
+    // A part used for one equipment grade follows that grade. Shared crafting
+    // resources keep their no-grade routing because they serve many tiers.
+    return productRanks?.size === 1 ? [...productRanks][0] : directRank;
 }
 
 function dGradeMarketFor(state = {}) {

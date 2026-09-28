@@ -1,5 +1,22 @@
 'use strict';
 
+// Older runtimes journaled AFK settlement through telemetry, and migration 32
+// copied both sides of a matched AFK trade. The seller event is the canonical
+// fill; the adjacent buyer event is only a second notification of that fill.
+const CANONICAL_FILTER = `NOT (market_trades.eventKey GLOB 'market:*'
+    AND market_trades.sourceType GLOB 'afk_*')
+    AND NOT (market_trades.eventKey GLOB 'afk:*' AND market_trades.channel = 'wtb'
+        AND EXISTS (
+            SELECT 1 FROM market_trades paired
+            WHERE paired.eventKey = 'afk:' || (CAST(SUBSTR(market_trades.eventKey, 5) AS INTEGER) - 1)
+                AND paired.occurredAt = market_trades.occurredAt
+                AND paired.selfId = market_trades.selfId
+                AND paired.quantity = market_trades.quantity
+                AND paired.unitPrice = market_trades.unitPrice
+                AND paired.sellerCharacterId = market_trades.sellerCharacterId
+                AND paired.buyerCharacterId = market_trades.buyerCharacterId
+        ))`;
+
 function tradeRow(row = {}) {
     return {
         id: Number(row.id || 0),
@@ -31,7 +48,7 @@ function aggregate(all, since) {
         COUNT(DISTINCT selfId) AS items,
         MIN(occurredAt) AS firstAt,
         MAX(occurredAt) AS lastAt
-        FROM market_trades WHERE occurredAt >= ?`, [since])[0] || {};
+        FROM market_trades WHERE occurredAt >= ? AND ${CANONICAL_FILTER}`, [since])[0] || {};
     return {
         trades: Number(row.trades || 0),
         units: Number(row.units || 0),
@@ -48,11 +65,12 @@ function fetch(all, { timestamp = Date.now(), recentLimit = 200 } = {}) {
     const dayAgo = current - 24 * 60 * 60 * 1000;
     const weekAgo = current - 7 * 24 * 60 * 60 * 1000;
     const recent = all(`SELECT * FROM market_trades
+        WHERE ${CANONICAL_FILTER}
         ORDER BY occurredAt DESC, id DESC LIMIT ${limit}`).map(tradeRow);
     const byItem = all(`SELECT selfId, MAX(itemName) AS name, COUNT(*) AS trades,
         COALESCE(SUM(quantity), 0) AS items, COALESCE(SUM(totalPrice), 0) AS adena,
         MAX(occurredAt) AS lastTradeAt
-        FROM market_trades INDEXED BY market_trades_recent WHERE occurredAt >= ?
+        FROM market_trades INDEXED BY market_trades_recent WHERE occurredAt >= ? AND ${CANONICAL_FILTER}
         GROUP BY selfId ORDER BY adena DESC, items DESC, selfId ASC`, [weekAgo])
         .map((row) => ({
             selfId: Number(row.selfId),
@@ -65,7 +83,7 @@ function fetch(all, { timestamp = Date.now(), recentLimit = 200 } = {}) {
     const byTown = Object.fromEntries(all(`SELECT COALESCE(town, 'Unknown') AS town,
         COUNT(*) AS trades, COALESCE(SUM(quantity), 0) AS items,
         COALESCE(SUM(totalPrice), 0) AS adena
-        FROM market_trades WHERE occurredAt >= ?
+        FROM market_trades WHERE occurredAt >= ? AND ${CANONICAL_FILTER}
         GROUP BY COALESCE(town, 'Unknown') ORDER BY adena DESC`, [weekAgo]).map((row) => [row.town, {
         trades: Number(row.trades || 0),
         items: Number(row.items || 0),
@@ -84,4 +102,4 @@ function fetch(all, { timestamp = Date.now(), recentLimit = 200 } = {}) {
     };
 }
 
-module.exports = { fetch };
+module.exports = { fetch, CANONICAL_FILTER };

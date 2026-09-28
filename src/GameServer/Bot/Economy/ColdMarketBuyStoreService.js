@@ -30,6 +30,8 @@ function bidFor(state, goal) {
     const basePrice = Number(template?.template?.price || 0);
     const adena = Math.max(0, Number(state?.adena || 0));
     if (!selfId || !template || basePrice <= 0 || adena <= 0) return null;
+    if (goal.type === 'upgrade_gear' && Number(template.etc?.slot || 0) > 0
+        && Number(state?.inventory?.[String(selfId)]?.amount || 0) > 0) return null;
 
     const reserve = Math.max(100, Number(goal.plan?.reserve || 0), Math.floor(adena * WALLET_RESERVE_PERCENT / 100));
     const spendable = Math.max(0, adena - reserve);
@@ -43,7 +45,11 @@ function bidFor(state, goal) {
     const referenceEstimate = goal.plan?.priceSource === 'reference' || legacyEstimate;
     const requestedPrice = referenceEstimate ? fairPrice
         : Math.max(0, Number(goal.target.adena || goal.plan?.estimatedCost || 0));
-    const price = Math.floor(Math.min(fairPrice, requestedPrice || fairPrice, spendable));
+    const reviewedMaterialOffer = goal.type === 'buy_craft_material'
+        && goal.plan?.priceSource === 'offer' && requestedPrice > 0
+        && ['afk_bot_store', 'afk_player_store'].includes(goal.plan?.sourceType);
+    const price = Math.floor(Math.min(reviewedMaterialOffer ? requestedPrice : fairPrice,
+        requestedPrice || fairPrice, spendable));
     if (price < BotMarketPricing.listingFloor(pricingItem)) return null;
 
     const requestedCount = goal.type === 'buy_craft_material'
@@ -187,7 +193,7 @@ function syncLiveBuyerSession(offer, buyer) {
 
 async function syncSellerStoreAfterSale(sellerState, selfId, qty, session = null) {
     const store = sellerState?.stats?.marketStore;
-    if (Number(store?.storeType || 1) !== 1) return sellerState;
+    if (!store || Number(store.storeType) !== 1) return sellerState;
     const items = (store.items || []).map((item) => (
         Number(item.selfId) === Number(selfId)
             ? { ...item, count: Math.max(0, Number(item.count || 0) - Number(qty || 0)) }
@@ -242,7 +248,7 @@ async function settleLine(sellerState, line, town, options = {}) {
         Number(offer.count || 0),
         Math.max(1, Number(options.maxQty || Infinity))
     );
-    if (offer.sourceType === 'afk_player_buy_store') {
+    if (['afk_player_buy_store', 'afk_bot_buy_store'].includes(offer.sourceType)) {
         if (qty <= 0) return { state: sellerState, sold: false };
         let trade;
         try {
@@ -364,12 +370,13 @@ async function buyFromAfkPlayerStore(offer, store, line) {
         utils.infoWarn('BotMarket', 'AFK sell-store buyer finalization failed after commit for %s: %s', buyerState.name, error.message);
     }
     syncLiveBuyerSession(offer, buyer);
+    const botOwned = !!store.botOwned;
     MarketTelemetry.purchase({
-        sourceType: 'afk_player_store',
+        sourceType: botOwned ? 'afk_bot_store' : 'afk_player_store',
         sourceId: Number(store.ownerId),
-        sourceName: offer.playerStoreName || 'AFK player',
-        sellerKind: 'player',
-        playerPriority: true,
+        sourceName: offer.playerStoreName || (botOwned ? 'AFK bot' : 'AFK player'),
+        sellerKind: botOwned ? 'bot' : 'player',
+        playerPriority: !botOwned,
         town: store.town,
         selfId: Number(line.selfId),
         itemName: line.name,

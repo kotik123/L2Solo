@@ -182,6 +182,21 @@ const saturated = MarketListingPolicy.classify(seller, saleItem(usefulWeapon, 1,
 assert.strictEqual(saturated.action, 'warehouse', 'supply above the demand ceiling must not create another store');
 assert.strictEqual(saturated.reason, 'saturated');
 
+const activeLowGrade = saleItem(lowGradeGear, 1, Math.floor(Number(lowGradeGear.template.price) * 0.8));
+const competingLowGrade = { characterId: 31, activity: 'merchant', stats: { marketStore: {
+    storeType: 1, items: [{ selfId: activeLowGrade.selfId, count: 2, price: activeLowGrade.price }]
+} } };
+const recentMarket = { states: [competingLowGrade], now, buyerActivity: new Map([[activeLowGrade.selfId, 3]]) };
+assert.strictEqual(MarketListingPolicy.classify(seller, activeLowGrade, recentMarket).action, 'list',
+    'distinct recent buyers should support one more competitive low-grade listing');
+const crowdedMarket = { ...recentMarket, buyerActivity: new Map([[activeLowGrade.selfId, 1]]) };
+const crowded = MarketListingPolicy.classify(seller, activeLowGrade, crowdedMarket);
+assert.strictEqual(crowded.action, 'npc', 'common gear with more asks than recent buyers should leave the market');
+assert.strictEqual(crowded.reason, 'market_oversupply');
+assert.strictEqual(MarketListingPolicy.classify(seller, {
+    ...activeLowGrade, npcComparable: false
+}, crowdedMarket).action, 'warehouse', 'enchanted gear should be retained instead of dumped at NPC');
+
 const staleWanted = {
     characterId: 40,
     currentRegion: 'Giran',

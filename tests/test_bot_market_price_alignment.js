@@ -8,6 +8,7 @@ const BuyStore = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService');
 const Listings = invoke('GameServer/Bot/Economy/MarketListingPolicy');
 const Disposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const Market = invoke('GameServer/Bot/Economy/MarketOpportunity');
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 DataCache.init();
 
 const originalRate = process.env.L2NODE_PROGRESSION_RATE;
@@ -73,6 +74,55 @@ try {
     assert.strictEqual(quotedGoal.target.adena, 2500000, 'a concrete offer must not be multiplied by the rate again');
     assert.strictEqual(quotedGoal.plan.priceSource, 'offer');
     assert.strictEqual(BuyStore.bidFor(state, quotedGoal).price, 2500000, 'WTB must respect a concrete offer limit');
+
+    const originalOffers = AfkTrade.offers;
+    const materialBuyer = { characterId: 2004011, level: 50, adena: 10000000,
+        inventory: {}, stats: { equipmentPlan: { status: 'active', strategy: 'craft',
+            recipeId: 1, marketFallback: false, clanGoal: { clanId: 1 }, materials: [
+                { selfId: 2068, amount: 3, missing: 3, farmEffort: 1000 }
+            ], next: { itemId: 2068 } } } };
+    try {
+        let ask = 3000000;
+        AfkTrade.offers = (selfId, type, options) => {
+            assert.strictEqual(Number(selfId), 2068);
+            assert.strictEqual(type, AfkTrade.SELL);
+            assert.strictEqual(options.characterId, materialBuyer.characterId);
+            return [{ selfId: 2068, price: ask, count: 3, town: 'Giran',
+                sourceType: 'afk_bot_store', sourceId: 2004012 }];
+        };
+        const materialGoal = () => Needs.evaluate(materialBuyer, { now: 1000 })
+            .find((candidate) => candidate.type === 'buy_craft_material');
+        const wanted = materialGoal();
+        assert.strictEqual(wanted.target.itemId, 2068, 'a fresh craft plan must notice a cheaper AFK component');
+        assert.strictEqual(wanted.plan.marketTown, 'Giran');
+        assert.strictEqual(wanted.plan.priceSource, 'offer');
+        assert.strictEqual(BuyStore.bidFor(materialBuyer, wanted).price, ask,
+            'a reviewed AFK ask may exceed the generic material price cap');
+        process.env.L2NODE_PROGRESSION_RATE = 'x1';
+        assert.strictEqual(materialGoal(), undefined,
+            'the same ask must be too expensive when farming earns x1 Adena');
+        process.env.L2NODE_PROGRESSION_RATE = 'x10';
+        ask = 7000000;
+        assert.strictEqual(materialGoal(), undefined, 'an ask costlier than farming must be ignored');
+        assert.strictEqual(Needs.evaluate({ ...materialBuyer,
+            inventory: { 2068: { selfId: 2068, amount: 2 } } }, { now: 1000 })
+            .some((candidate) => candidate.type === 'buy_craft_material'), false,
+        'a partial purchase must not inflate the estimated farm cost of the remaining piece');
+        ask = 3000000;
+        assert.strictEqual(Needs.evaluate({ ...materialBuyer,
+            inventory: { 2068: { selfId: 2068, amount: 2 } } }, { now: 1000 })
+            .find((candidate) => candidate.type === 'buy_craft_material').target.amount, 1,
+        'a revised order must request only the remaining component');
+        assert.strictEqual(Needs.evaluate({ ...materialBuyer, adena: 200000 }, { now: 1000 })
+            .some((candidate) => candidate.type === 'buy_craft_material'), false,
+        'the bot must retain its Adena reserve');
+        assert.strictEqual(Needs.evaluate({ ...materialBuyer, stats: { ...materialBuyer.stats,
+            marketRetryAfter: 1001 } }, { now: 1000 })
+            .some((candidate) => candidate.type === 'buy_craft_material'), false,
+        'a failed material purchase must respect retry delay');
+    } finally {
+        AfkTrade.offers = originalOffers;
+    }
 
     const enchanted = { ...pricingItem(178), enchant: 3 };
     assert.strictEqual(Pricing.npcPrice(enchanted), Infinity, 'ordinary NPC stock must not cap enchanted gear');

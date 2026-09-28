@@ -3015,7 +3015,7 @@ const BotLifeState = {
         if (!id || !state) return Promise.resolve(null);
         return Database.fetchItems(id).then((items) => {
             const inventory = inventorySummaryFromItems(items || []);
-            return this.upsertState({
+            const refreshed = {
                 ...state,
                 adena: inventoryAdena(inventory),
                 inventory,
@@ -3024,7 +3024,16 @@ const BotLifeState = {
                     equipment: equipmentSummaryFromInventory(inventory)
                 },
                 updatedAt: now()
-            }, reason);
+            };
+            const fromAfkTrade = String(reason).startsWith('afk_trade_');
+            const reconciled = fromAfkTrade ? reconcileEquipmentInventory(refreshed) : refreshed;
+            const equipmentChanged = fromAfkTrade && JSON.stringify(refreshed.stats.equipment)
+                !== JSON.stringify(reconciled.stats.equipment);
+            return this.upsertState(reconciled, reason).then((saved) => (
+                saved && equipmentChanged
+                    ? syncInventorySummary(id, saved.inventory).then(() => saved)
+                    : saved
+            ));
         });
     },
 

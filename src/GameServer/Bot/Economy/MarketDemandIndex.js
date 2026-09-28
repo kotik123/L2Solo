@@ -58,21 +58,54 @@ function indexSignals(allStates, timestamp = Date.now()) {
     return byItem;
 }
 
+function indexSupply(allStates) {
+    const byItem = new Map();
+    for (const state of allStates || []) {
+        if (state?.activity !== 'merchant') continue;
+        const store = state.stats?.marketStore;
+        if (!store || Number(store.storeType || 1) !== 1) continue;
+        for (const item of store.items || []) {
+            const selfId = Number(item.selfId || 0);
+            if (!selfId || Number(item.count || 0) <= 0) continue;
+            if (!byItem.has(selfId)) byItem.set(selfId, []);
+            byItem.get(selfId).push({
+                characterId: Number(state.characterId),
+                town: store.town || state.currentRegion || null,
+                count: Number(item.count), price: Number(item.price || 0)
+            });
+        }
+    }
+    return byItem;
+}
+
 function demandFor(selfId, options = {}) {
     const timestamp = Number(options.now) || Date.now();
     const unitPrice = Math.max(0, Number(options.unitPrice || 0));
     const excludedCharacterId = Number(options.excludeCharacterId || 0);
+    const afkOrders = invoke('GameServer/AfkTrade/AfkTradeService').offers(selfId, 3, {
+        characterId: excludedCharacterId
+    }).filter((offer) => Number(offer.count) > 0 && Number(offer.price) > 0);
+    const afkOwners = new Set(afkOrders.map((offer) => Number(offer.sourceId)));
     const signals = options.signals
-        ? options.signals.filter((signal) => Number(signal.characterId) !== excludedCharacterId)
+        ? options.signals.filter((signal) => Number(signal.characterId) !== excludedCharacterId
+            && !afkOwners.has(Number(signal.characterId)))
         : states(options)
-            .filter((state) => Number(state.characterId) !== excludedCharacterId)
+            .filter((state) => Number(state.characterId) !== excludedCharacterId
+                && !afkOwners.has(Number(state.characterId)))
             .map((state) => demandSignal(state, selfId, timestamp))
             .filter(Boolean);
+    const afkOrderUnits = afkOrders.reduce((sum, offer) => sum + Number(offer.count), 0);
+    const fundedAfkUnits = afkOrders.reduce((sum, offer) => sum + (
+        unitPrice <= 0 || Number(offer.price) >= unitPrice ? Number(offer.count) : 0
+    ), 0);
     const towns = signals.reduce((result, signal) => {
         if (!signal.town) return result;
         result[signal.town] = (result[signal.town] || 0) + signal.amount;
         return result;
     }, {});
+    afkOrders.forEach((offer) => {
+        if (offer.town) towns[offer.town] = (towns[offer.town] || 0) + Number(offer.count);
+    });
     const readySignals = signals.filter((signal) => signal.ready);
     const affordableUnits = (signal) => {
         if (!signal.ready) return 0;
@@ -84,9 +117,10 @@ function demandFor(selfId, options = {}) {
         bots: signals.length,
         readyBots: readySignals.length,
         fundedBots: readySignals.filter((signal) => affordableUnits(signal) > 0).length,
-        units: signals.reduce((sum, signal) => sum + signal.amount, 0),
-        readyUnits: readySignals.reduce((sum, signal) => sum + signal.amount, 0),
-        fundedUnits: signals.reduce((sum, signal) => sum + affordableUnits(signal), 0),
+        afkOrders: afkOrders.length,
+        units: signals.reduce((sum, signal) => sum + signal.amount, 0) + afkOrderUnits,
+        readyUnits: readySignals.reduce((sum, signal) => sum + signal.amount, 0) + afkOrderUnits,
+        fundedUnits: signals.reduce((sum, signal) => sum + affordableUnits(signal), 0) + fundedAfkUnits,
         unitPrice,
         towns,
         signals
@@ -95,7 +129,9 @@ function demandFor(selfId, options = {}) {
 
 function supplyFor(selfId, options = {}) {
     const excludedCharacterId = Number(options.excludeCharacterId || 0);
-    const offers = states(options).flatMap((state) => {
+    const coldOffers = options.supplyByItem
+        ? options.supplyByItem.get(Number(selfId)) || []
+        : states(options).flatMap((state) => {
         if (Number(state.characterId) === excludedCharacterId || state.activity !== 'merchant') return [];
         const store = state.stats?.marketStore;
         if (!store || Number(store.storeType || 1) !== 1) return [];
@@ -108,6 +144,15 @@ function supplyFor(selfId, options = {}) {
             price: Number(item.price || 0)
         }];
     });
+    const offers = coldOffers.filter((offer) => Number(offer.characterId) !== excludedCharacterId)
+        .concat(invoke('GameServer/AfkTrade/AfkTradeService').offers(selfId, 1, {
+        characterId: excludedCharacterId
+    }).map((offer) => ({
+        characterId: Number(offer.sourceId),
+        town: offer.town,
+        count: Number(offer.count),
+        price: Number(offer.price)
+    })));
     return {
         selfId: Number(selfId),
         sellers: offers.length,
@@ -126,4 +171,5 @@ function snapshot(selfId, options = {}) {
     };
 }
 
-module.exports = { WANTED_TTL_MS, demandFor, demandSignal, indexSignals, snapshot, supplyFor, timestampForWanted };
+module.exports = { WANTED_TTL_MS, demandFor, demandSignal, indexSignals, indexSupply,
+    snapshot, supplyFor, timestampForWanted };

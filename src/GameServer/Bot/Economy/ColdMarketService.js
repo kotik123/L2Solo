@@ -91,6 +91,17 @@ const ColdMarketService = {
             buyerCharacterId: state.characterId
         });
         if (!offer) {
+            const BotAfkMarket = invoke('GameServer/Bot/Economy/BotAfkMarketService');
+            if (BotAfkMarket.canTradeRemotely(state, goal)) {
+                return BotAfkMarket.reconcile(state, goal).then((remote) => ({
+                    state: remote.state || state,
+                    purchased: false,
+                    reason: remote.changed ? 'afk_buy_store_opened' : 'afk_buy_store_unchanged',
+                    buyStore: remote.shop || null,
+                    wanted: true,
+                    remoteOffer: null
+                }));
+            }
             // A stale NG/D goal should be replanned instead of creating a WTB
             // shop. Concrete player and NPC offers are both considered above.
             if (lowTierGearPurchase) return finishBlockedPurchase(state, goal, 'low_tier_offer_missing');
@@ -114,7 +125,7 @@ const ColdMarketService = {
         offer.equipSlot = Number(goal.target.itemSlot || 0) || undefined;
         const blocker = LifeState.marketPurchaseBlocker(state, offer, 1);
         if (blocker) return finishBlockedPurchase(state, goal, blocker);
-        if (offer.sourceType === 'afk_player_store') {
+        if (['afk_player_store', 'afk_bot_store'].includes(offer.sourceType)) {
             return invoke('GameServer/AfkTrade/AfkTradeService').buyFromShop(
                 state.characterId,
                 offer.store,

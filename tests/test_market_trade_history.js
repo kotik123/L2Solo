@@ -6,6 +6,7 @@ require('../src/Global');
 
 const Database = invoke('Database');
 const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
+const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const databasePath = path.join(process.cwd(), 'tmp', 'test-market-trade-history.sqlite');
 
 function clean() {
@@ -80,6 +81,31 @@ function clean() {
     });
     assert.strictEqual(history.buckets.length, 2);
     assert.deepStrictEqual(Object.keys(history.channels).sort(), ['wtb', 'wts']);
+
+    const afkTrade = {
+        ...base, selfId: 45, itemName: 'Bone Helmet', quantity: 1, unitPrice: 25000,
+        channel: 'bot_wts', sourceType: 'afk_bot_store', at: timestamp - 2 * 60 * 60 * 1000
+    };
+    await Database.recordMarketTrade({ ...afkTrade, eventKey: 'afk:122' });
+    await Database.recordMarketTrade({ ...afkTrade, eventKey: 'afk:123', channel: 'wtb',
+        sourceType: 'afk_player_buy_store' });
+    await Database.recordMarketTrade({ ...afkTrade, eventKey: 'market:old:duplicate',
+        channel: 'wtb', sourceType: 'afk_bot_buy_store', at: afkTrade.at + 5 });
+    await Database.recordMarketTrade({ ...afkTrade, eventKey: 'afk:125', selfId: 47,
+        itemName: 'Mithril Helmet', channel: 'wtb', sourceType: 'afk_bot_buy_store' });
+    const deduplicated = await Database.fetchMarketTradeOverview({ timestamp });
+    assert.strictEqual(deduplicated.windows.day.trades, 5,
+        'Observer totals must count an AFK settlement once even with old telemetry rows');
+    assert.strictEqual(deduplicated.byItem.find((item) => item.selfId === 45).trades, 1);
+    assert.strictEqual(deduplicated.byItem.find((item) => item.selfId === 47).trades, 1,
+        'an unmatched buy-shop fill must remain visible');
+    assert.strictEqual(deduplicated.recent.filter((trade) => trade.selfId === 45).length, 1);
+    assert.strictEqual((await Database.fetchMarketTradeHistory(45, { timestamp })).summary.trades, 1);
+    MarketTelemetry.dynamicBuyerSale({ ...afkTrade, sourceId: 11, sourceName: 'Buyer' }, 1,
+        { sellerCharacterId: 10, sellerName: 'Seller' });
+    assert.strictEqual((await Database.execute([
+        "SELECT COUNT(*) AS n FROM market_trades WHERE eventKey GLOB 'market:*' AND sourceType = 'afk_bot_buy_store'"
+    ]))[0].n, 1, 'new AFK telemetry must not add another persistent trade');
 
     const migration = await Database.execute(['SELECT version FROM schema_migrations WHERE version = 32'], 'test:market-migration');
     assert.strictEqual(migration.length, 1);

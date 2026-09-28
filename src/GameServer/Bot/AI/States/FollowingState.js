@@ -219,7 +219,7 @@ function companionTownErrand(session, bot, player, BotAI) {
         const offer = MarketOpportunity.findBuyOffers(item.fetchSelfId(), {
             town: town.name,
             sellerCharacterId: bot.fetchId()
-        }).find((candidate) => candidate.sourceType === 'afk_player_buy_store');
+        }).find((candidate) => ['afk_player_buy_store', 'afk_bot_buy_store'].includes(candidate.sourceType));
         if (!offer) return [];
         return [{
             offer,

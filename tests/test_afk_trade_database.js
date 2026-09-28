@@ -181,6 +181,27 @@ function amountOf(rows, selfId) {
     assert.deepStrictEqual(expanded.lines.map(line => line.selfId), expandedLines.map(line => line.selfId));
     await Database.closeAfkTradeShop(ownerId);
     assert.strictEqual(amountOf(await inventory(ownerId), 3005), 2, 'sixth slot stock returns on closure');
+
+    const remoteStock = (await inventory(ownerId)).find((row) => Number(row.selfId) === 1001);
+    const playerSale = await Database.createAfkTradeShop(ownerId, {
+        storeType: 1, town: 'Giran', locX: 83000, locY: 148000, locZ: -3400,
+        lines: [{ objectId: remoteStock.id, selfId: 1001, name: 'Test Material',
+            count: 1, price: 12, stackable: true }]
+    });
+    const playerBuy = await Database.createAfkTradeShop(customerId, {
+        storeType: 3, town: 'Dion', locX: 16308, locY: 143760, locZ: -2888,
+        lines: [{ selfId: 1001, name: 'Test Material', count: 1, price: 20, stackable: true }]
+    });
+    await assert.rejects(Database.matchAfkTradeShops({
+        sellerId: ownerId, buyerId: customerId,
+        sellShopId: playerSale.shop.id, buyShopId: playerBuy.shop.id,
+        sellLineId: playerSale.shop.lines[0].id, buyLineId: playerBuy.shop.lines[0].id,
+        amount: 1
+    }), /afk_trade_shop_changed/, 'two player shops must not settle remotely across towns');
+    assert.strictEqual((await Database.fetchAfkTradeShops(ownerId))[0].lines[0].count, 1);
+    assert.strictEqual((await Database.fetchAfkTradeShops(customerId))[0].escrowAdena, 20);
+    await Database.closeAfkTradeShop(ownerId);
+    await Database.closeAfkTradeShop(customerId);
     await Database.close();
     clean();
     console.log('AFK trade database checks passed');

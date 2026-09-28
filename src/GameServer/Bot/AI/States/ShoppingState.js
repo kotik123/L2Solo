@@ -37,7 +37,7 @@ function findAfkBuyer(bot, town) {
         const offer = MarketOpportunity.findBuyOffers(item.fetchSelfId(), {
             town: town?.name,
             sellerCharacterId: bot.fetchId()
-        }).find((candidate) => candidate.sourceType === 'afk_player_buy_store');
+        }).find((candidate) => ['afk_player_buy_store', 'afk_bot_buy_store'].includes(candidate.sourceType));
         if (!offer) return;
         const qty = Math.min(Number(item.fetchAmount?.() || 0), Number(offer.count || 0));
         if (qty <= 0) return;

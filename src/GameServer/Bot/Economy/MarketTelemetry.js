@@ -113,7 +113,10 @@ function recordTrade(details = {}) {
     const town = townTotals.get(townName) || { town: townName, trades: 0, items: 0, adena: 0, channels: {} };
     incrementTotals(town, trade);
     townTotals.set(townName, town);
-    if (Database.isReady?.() && !String(trade.sourceType || '').startsWith('afk_player_')) {
+    // AFK settlement writes its own canonical trade row in the same SQLite
+    // transaction. Telemetry still updates live counters, but must not journal
+    // the same exchange again with a second event key.
+    if (Database.isReady?.() && !String(trade.sourceType || '').startsWith('afk_')) {
         Database.recordMarketTrade(trade).catch((error) => {
             add('journalWriteFailures');
             if (Date.now() - lastJournalWarningAt < 60_000) return;
@@ -185,7 +188,7 @@ module.exports = {
         const count = Math.max(1, Number(quantity) || 1);
         const adena = Math.max(0, Number(offer?.price || 0)) * count;
         const npc = offer?.sourceType === 'npc';
-        const peer = offer?.sourceType === 'cold_store'
+        const peer = offer?.sourceType === 'cold_store' || offer?.sourceType === 'afk_bot_store'
             || (offer?.sourceType === 'private_store' && offer?.sellerKind === 'bot');
         const channel = npc
             ? 'npc_buy'

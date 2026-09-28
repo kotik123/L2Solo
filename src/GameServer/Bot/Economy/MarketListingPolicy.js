@@ -2,12 +2,15 @@ const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
 const BotMarketPricing = invoke('GameServer/Bot/Economy/BotMarketPricing');
+const MarketBuyerActivity = invoke('GameServer/Bot/Economy/MarketBuyerActivity');
+const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const ProgressionRates = invoke('GameServer/ProgressionRates');
 
 const MARKET_GEAR_MIN_BASE_PRICE = ItemDisposition.NPC_LIQUIDATION_MAX_UNIT_PRICE;
 const SPECULATIVE_GEAR_MIN_BASE_PRICE = 10000;
 const SPECULATIVE_SUPPLY_LIMIT = 1;
 const MIN_LISTING_BASE_PERCENT = 60;
+const NPC_SURPLUS_GEAR_MAX_BASE_PRICE = 50000;
 
 let newbieItemSource = null;
 let newbieItemIds = new Set();
@@ -31,7 +34,14 @@ function allowsLowGradeMarket() {
 
 function listOrWarehouse(item, decision) {
     if (listingPrice(item, decision) !== null) return decision;
-    return { action: 'warehouse', reason: 'non_competitive_floor', market: decision.market };
+    return surplusGearDecision(item, 'non_competitive_floor', decision.market);
+}
+
+function surplusGearDecision(item, reason, market) {
+    const ordinary = item.npcComparable !== false && Number(item.enchant || 0) <= 0;
+    const common = isGear(item) && ordinary
+        && Number(item.basePrice || 0) <= NPC_SURPLUS_GEAR_MAX_BASE_PRICE;
+    return { action: common ? 'npc' : 'warehouse', reason, market };
 }
 
 function classify(state, item, options = {}) {
@@ -42,15 +52,16 @@ function classify(state, item, options = {}) {
         return { action: 'npc', reason: 'npc_only_item' };
     }
     if (starterItemIds().has(Number(item.selfId))) {
-        return { action: 'npc', reason: 'starter_kit' };
+        return isGear(item) ? surplusGearDecision(item, 'starter_kit')
+            : { action: 'npc', reason: 'starter_kit' };
     }
     const lowGradeGear = isGear(item)
         && ItemDisposition.gradeIndex(item.rank) < ItemDisposition.gradeIndex('c');
     if (lowGradeGear && !allowsLowGradeMarket()) {
-        return { action: 'npc', reason: 'low_grade_high_rate' };
+        return surplusGearDecision(item, 'low_grade_high_rate');
     }
     if (isGear(item) && !lowGradeGear && Number(item.basePrice || 0) <= MARKET_GEAR_MIN_BASE_PRICE) {
-        return { action: 'npc', reason: 'low_value_gear' };
+        return surplusGearDecision(item, 'low_value_gear');
     }
 
     const marketOptions = {
@@ -63,14 +74,34 @@ function classify(state, item, options = {}) {
         supply,
         demand: MarketDemandIndex.demandFor(item.selfId, { ...marketOptions, unitPrice })
     };
-    if (market.demand.bots <= 0) {
-        if (lowGradeGear) return { action: 'npc', reason: 'low_grade_no_funded_demand', market };
-        return { action: 'warehouse', reason: 'no_demand', market };
+    if (isGear(item)) {
+        const buyers = Math.max(0, Number(options.buyerActivity?.get?.(Number(item.selfId))
+            ?? options.buyerActivity?.[Number(item.selfId)]
+            ?? MarketBuyerActivity.count(item.selfId)) || 0);
+        const competitiveUnits = supply.offers.reduce((units, offer) => units + (
+            Number(offer.price || 0) <= Math.ceil(unitPrice * 1.05)
+                ? Math.max(0, Number(offer.count || 0)) : 0
+        ), 0);
+        market.recentBuyers = buyers;
+        market.competitiveUnits = competitiveUnits;
     }
-    const actionableUnits = Math.max(0, Number(market.demand.fundedUnits || 0));
+    const fundedUnits = Math.max(0, Number(market.demand.fundedUnits || 0));
+    if (isGear(item) && fundedUnits <= market.supply.units && market.recentBuyers > 0) {
+        const available = Math.max(0, market.recentBuyers - market.competitiveUnits);
+        if (available > 0) return listOrWarehouse(item, {
+            action: 'list', reason: 'recent_buyer_activity',
+            listCount: Math.min(Number(item.count), available), market
+        });
+        return surplusGearDecision(item, 'market_oversupply', market);
+    }
+    if (market.demand.bots <= 0 && Number(market.demand.afkOrders || 0) <= 0) {
+        if (lowGradeGear) return surplusGearDecision(item, 'low_grade_no_funded_demand', market);
+        return surplusGearDecision(item, 'no_demand', market);
+    }
+    const actionableUnits = fundedUnits;
     if (actionableUnits > 0) {
         const availableUnits = Math.max(0, actionableUnits - market.supply.units);
-        if (availableUnits <= 0) return { action: 'warehouse', reason: 'saturated', market };
+        if (availableUnits <= 0) return surplusGearDecision(item, 'saturated', market);
         return listOrWarehouse(item, {
             action: 'list',
             reason: 'active_demand',
@@ -80,11 +111,11 @@ function classify(state, item, options = {}) {
     }
 
     if (market.demand.readyBots > 0) {
-        if (lowGradeGear) return { action: 'npc', reason: 'low_grade_no_funded_demand', market };
+        if (lowGradeGear) return surplusGearDecision(item, 'low_grade_no_funded_demand', market);
         return { action: 'warehouse', reason: 'unfunded_demand', market };
     }
     if (lowGradeGear) {
-        return { action: 'npc', reason: 'low_grade_no_funded_demand', market };
+        return surplusGearDecision(item, 'low_grade_no_funded_demand', market);
     }
     const speculative = isGear(item)
         && Number(item.basePrice || 0) >= SPECULATIVE_GEAR_MIN_BASE_PRICE
@@ -102,7 +133,7 @@ function classify(state, item, options = {}) {
         });
     }
     if (market.supply.units >= SPECULATIVE_SUPPLY_LIMIT) {
-        return { action: 'warehouse', reason: 'saturated', market };
+        return surplusGearDecision(item, 'saturated', market);
     }
     return { action: 'warehouse', reason: 'latent_demand', market };
 }
@@ -135,8 +166,12 @@ function evaluate(state, options = {}) {
         ...marketCandidates,
         ...npcCandidates.filter((item) => !marketIds.has(Number(item.selfId)))
     ];
+    const states = options.states || LifeState.allStates(5000);
+    const supplyByItem = options.supplyByItem || MarketDemandIndex.indexSupply(states);
+    const signalsByItem = options.signalsByItem || MarketDemandIndex.indexSignals(states, Number(options.now) || Date.now());
     const decisions = candidates.map((item) => {
-        const decision = classify(state, item, options);
+        const decision = classify(state, item, { ...options, states, supplyByItem,
+            signals: options.signals || signalsByItem.get(Number(item.selfId)) || [] });
         return {
             ...decision,
             item: decision.action === 'list' ? {

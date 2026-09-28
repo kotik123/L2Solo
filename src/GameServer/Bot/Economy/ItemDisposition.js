@@ -13,6 +13,7 @@ const WAREHOUSE_GEAR_MIN_BASE_PRICE = 1000;
 const TRADE_MIN_LEVEL = 10;
 const INVENTORY_SLOT_LIMIT = 80;
 const NPC_ONLY_CLEANUP_MIN_SLOTS = 3;
+const NPC_SURPLUS_GEAR_MIN_SLOTS = 6;
 const CLAN_PROGRESSION_ITEM_IDS = new Set([1419]);
 const GRADE_ORDER = Object.freeze({ none: 0, d: 1, c: 2, b: 3, a: 4, s: 5 });
 
@@ -164,6 +165,15 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     const overCapacity = slots > INVENTORY_SLOT_LIMIT;
     const accumulatedNpcOnly = isTradeEligible(state)
         && (skillBookSlots > 0 || npcOnlySlots >= NPC_ONLY_CLEANUP_MIN_SLOTS);
+    const surplusGearSlots = isTradeEligible(state) && slots >= NPC_SURPLUS_GEAR_MIN_SLOTS
+        ? saleCandidates(state, { unlimited: true }).reduce((total, item) => {
+            const lowGradeGear = (String(item.kind || '').startsWith('Weapon.')
+                || String(item.kind || '').startsWith('Armor.'))
+                && gradeIndex(item.rank) < gradeIndex('c');
+            return total + (lowGradeGear && item.npcComparable !== false
+                && item.basePrice <= 50000 ? Number(item.count || 0) : 0);
+        }, 0) : 0;
+    const accumulatedSurplus = surplusGearSlots >= NPC_SURPLUS_GEAR_MIN_SLOTS;
     // A normal market retry cooldown prevents pointless town loops. Residual
     // NPC-only books/recipes become deterministic cleanup work once a
     // generated character reaches its trading phase. Before that point they
@@ -172,11 +182,13 @@ function inventoryCleanupNeed(state = {}, options = {}) {
     if (Number(state.stats?.marketSellRetryAfter || 0) > timestamp
         && !overCapacity
         && !accumulatedNpcOnly) return null;
-    if (!overCapacity && !accumulatedNpcOnly) return null;
+    if (!overCapacity && !accumulatedNpcOnly && !accumulatedSurplus) return null;
     return {
-        reason: overCapacity ? 'inventory_capacity' : 'npc_only_inventory',
+        reason: overCapacity ? 'inventory_capacity'
+            : accumulatedNpcOnly ? 'npc_only_inventory' : 'market_surplus_inventory',
         slots,
         npcOnlySlots,
+        ...(overCapacity || accumulatedNpcOnly ? {} : { surplusGearSlots }),
         limit: INVENTORY_SLOT_LIMIT
     };
 }
@@ -218,11 +230,55 @@ function reservedCombinationAmounts(state) {
     }, {});
 }
 
+function reservedUpgradeAmounts(state) {
+    const Planner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
+    const role = Planner.roleFor(state);
+    const classId = Number(state?.stats?.classId || state?.classId || 0);
+    const allowedRank = gradeIndex(Planner.gradeForLevel(state?.level));
+    const equippedBySlot = new Map();
+    const stagedBySlot = new Map();
+    for (const entry of Object.values(state?.inventory || {})) {
+        const template = templateFor(entry?.selfId);
+        const slot = Number(template?.etc?.slot || 0);
+        if (!isEquipmentItem(entry, template) || ![6, 9, 10, 11, 12, 15].includes(slot)) continue;
+        const rank = gradeIndex(template?.etc?.rank);
+        const score = Planner.itemScore(template, role, classId);
+        const candidate = { selfId: Number(entry.selfId), rank, score };
+        if (entry.equipped || Number(entry.equippedCount || 0) > 0) {
+            equippedBySlot.set(slot, candidate);
+            continue;
+        }
+        if (Number(entry.amount || 0) < 1 || rank > allowedRank
+            || !Planner.suitable(template, state, role, template.etc?.rank)) continue;
+        const current = stagedBySlot.get(slot);
+        if (!current || rank > current.rank || rank === current.rank && score > current.score) {
+            stagedBySlot.set(slot, candidate);
+        }
+    }
+    const reserved = {};
+    for (const [slot, candidate] of stagedBySlot) {
+        const worn = slot === 15
+            ? [equippedBySlot.get(15), equippedBySlot.get(10), equippedBySlot.get(11)]
+                .filter(Boolean).sort((left, right) => right.rank - left.rank || right.score - left.score)[0]
+            : equippedBySlot.get(slot) || ([10, 11].includes(slot) ? equippedBySlot.get(15) : null);
+        if (!worn || candidate.rank > worn.rank
+            || candidate.rank === worn.rank && candidate.score > worn.score) {
+            reserved[candidate.selfId] = 1;
+        }
+    }
+    return reserved;
+}
+
 function reservedEquipmentAmounts(state) {
     const craft = reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
-    return [...new Set([...Object.keys(craft), ...Object.keys(combination)])].reduce((reserved, selfId) => {
-        reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0));
+    const upgrades = reservedUpgradeAmounts(state);
+    const targetId = Number(state?.stats?.equipmentPlan?.target?.selfId || 0);
+    if (targetId && Number(state?.inventory?.[targetId]?.amount || 0) > 0
+        && !state.inventory[targetId].equipped) upgrades[targetId] = 1;
+    return [...new Set([...Object.keys(craft), ...Object.keys(combination), ...Object.keys(upgrades)])].reduce((reserved, selfId) => {
+        reserved[selfId] = Math.max(Number(craft[selfId] || 0), Number(combination[selfId] || 0),
+            Number(upgrades[selfId] || 0));
         return reserved;
     }, {});
 }

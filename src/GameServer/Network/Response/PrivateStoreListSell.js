@@ -12,7 +12,8 @@ module.exports = function privateStoreListSell(seller, customer) {
     packet.writeD(seller.fetchId()).writeD(store.packageSale ? 1 : 0).writeD(customer.backpack.fetchTotalAdena()).writeD(rows.length);
     rows.forEach(({ row, item }) => {
         packet.writeD(item.fetchClass2()).writeD(item.fetchId()).writeD(item.fetchSelfId()).writeD(row.count)
-            .writeH(0).writeH(0).writeH(0).writeD(bodyPart(item)).writeD(row.price);
+            .writeH(0).writeH(item.fetchEnchantLevel?.() || 0).writeH(0)
+            .writeD(bodyPart(item)).writeD(row.price).writeD(item.fetchPrice());
     });
     return packet.fetchBuffer();
 };

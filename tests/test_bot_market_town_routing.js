@@ -51,6 +51,14 @@ assert.strictEqual(
     'Gludio',
     'legacy store rows without a persisted rank must recover the grade from their item id'
 );
+assert.strictEqual(ListingService.targetMarketTownName(state, [{ selfId: 1900 }]), 'Gludio',
+    'a D-grade recipe fragment must follow its crafted equipment grade');
+assert.strictEqual(ListingService.targetMarketTownName(state, [{ selfId: 2935 }]), 'Giran',
+    'a C-grade recipe fragment must not be routed as a no-grade material');
+assert.strictEqual(ListingService.targetMarketTownName(state, [{ selfId: 1919 }]), 'Giran',
+    'a B-grade recipe fragment must use Giran');
+assert.strictEqual(ListingService.targetMarketTownName(state, [{ selfId: 1865 }]), 'Elven Village',
+    'shared no-grade resources must keep their local starter market');
 assert(Number.isInteger(ListingService.MARKET_TOWN_ROUTING_VERSION) && ListingService.MARKET_TOWN_ROUTING_VERSION > 0, 'legacy market migration must be versioned and finite');
 const legacyStore = {
     ...state,

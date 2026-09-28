@@ -661,7 +661,13 @@ function preferredNoGradeTarget(state = {}, options = {}) {
 
 function marketOfferForTarget(target, state = {}, options = {}) {
     if (!target) return null;
-    if (typeof options.findMarketOffer === 'function') return options.findMarketOffer(target, state) || null;
+    const maxPrice = options.maxMarketPrice === undefined ? Infinity : Math.max(0, Number(options.maxMarketPrice) || 0);
+    const usable = (offer) => offer && offer.available !== false
+        && Number(offer.count ?? 1) > 0 && Number(offer.price) > 0 && Number(offer.price) <= maxPrice;
+    if (typeof options.findMarketOffer === 'function') {
+        const offer = options.findMarketOffer(target, state);
+        return usable(offer) ? offer : null;
+    }
     const towns = [...new Set([
         state.currentRegion,
         ...Object.keys(MarketOpportunity.TOWN_NPC_SELLERS || {}),
@@ -670,10 +676,10 @@ function marketOfferForTarget(target, state = {}, options = {}) {
     return towns
         .map((town) => MarketOpportunity.bestOffer(target.selfId, {
             town,
-            budget: Infinity,
+            budget: maxPrice,
             buyerCharacterId: state.characterId
         }))
-        .filter(Boolean)
+        .filter(usable)
         .sort((left, right) => Number(left.price) - Number(right.price))[0] || null;
 }
 
@@ -796,6 +802,7 @@ function npcCandidatesForSlot(state = {}, desiredSlot, maxRank, options = {}) {
     const excluded = excludedTargetIds(options);
     return staticNpcItems(options).filter((item) => !excluded.has(Number(item.selfId)))
         .filter((item) => itemMatchesDesiredSlot(item, desiredSlot))
+        .filter((item) => Number(state.inventory?.[String(item.selfId)]?.amount || 0) < 1)
         .filter((item) => rankIndex(item.etc?.rank) <= rankIndex(maxRank))
         .filter((item) => suitable(item, state, role, item.etc?.rank))
         .filter((item) => requiredDualSword
@@ -947,6 +954,13 @@ function marketPlanForTarget(state = {}, targetId, options = {}) {
     if (!isSlotUpgrade(target, ownedItems, role, classIdFor(state))) return null;
     const offer = marketOfferForTarget(target, state, options);
     return offer ? marketPlan(state, target, offer) : null;
+}
+
+function fundedMarketPlanForTarget(state = {}, targetId, options = {}) {
+    const market = marketPlanForTarget(state, targetId, options);
+    return market && Number(state.adena || state.inventory?.[57]?.amount || 0)
+        >= Number(market.market.price || Infinity) + operationalAdenaReserve(state)
+        ? market : null;
 }
 
 function marketRecoveryPlanForTarget(state = {}, targetId, options = {}) {
@@ -1607,6 +1621,13 @@ function replacementPlanFor(state = {}, previousPlan = {}, spots = [], options =
             const refreshed = planFor(state, { ...options, spots, recipeId: previousPlan.recipeId });
             if (['active', 'component_ready', 'ready_to_craft', 'complete'].includes(refreshed?.status)) return refreshed;
         }
+        // A new funded listing can replace a retained farm or craft route on
+        // the next resolve, without waiting for that route to fail first.
+        if (['direct_drop', 'craft'].includes(previousPlan.strategy)
+            && previousPlan.status === 'active') {
+            const market = fundedMarketPlanForTarget(state, targetId, options);
+            if (market) return market;
+        }
         const source = bestSourceForPlan(state, previousPlan, spots, options);
         if (source) return retargetPlanSource(state, previousPlan, source);
     }
@@ -1801,6 +1822,22 @@ function missingMaterials(recipe, inventory) {
         owned: Number(owned.get(Number(material.selfId)) || 0),
         missing: Math.max(0, Number(material.amount || 0) - Number(owned.get(Number(material.selfId)) || 0))
     }));
+}
+
+function withMaterialFarmEffort(plan, state, spots, options = {}) {
+    if (plan?.status !== 'active' || plan.strategy !== 'craft'
+        || !(plan.materials || []).some((material) => !Object.hasOwn(material, 'farmEffort'))) return plan;
+    const allowedRecipeIds = options.allowedRecipeIds || stationRecipeIds();
+    const planningOptions = { ...options, sourceCache: options.sourceCache || new Map() };
+    return { ...plan, materials: plan.materials.map((material) => {
+        if (Object.hasOwn(material, 'farmEffort')) return material;
+        const missing = Math.max(0, Number(material.missing || 0));
+        const source = missing > 0
+            ? farmSourceForMaterial(material.selfId, state, spots, allowedRecipeIds,
+                missing, new Set(), planningOptions)
+            : null;
+        return { ...material, farmEffort: Number.isFinite(source?.effort) ? source.effort : null };
+    }) };
 }
 
 function combinationMetadata(recipe) {
@@ -2037,7 +2074,11 @@ function rawPlanFor(state = {}, options = {}) {
         expectedKills: next ? Math.ceil(strategy === 'direct_drop' ? directKills : craftKills) : 0,
         expectedEffort: next ? Math.ceil(strategy === 'direct_drop' ? directEffort : craftKills) : 0,
         market: buy ? { town: offer.town || 'Giran', price: Number(offer.price), sourceType: offer.sourceType } : null,
-        materials: materialPlans.map(({ source, ...material }) => ({ ...material, sourceSpotId: source?.spotId || null })),
+        materials: materialPlans.map(({ source, ...material }) => ({
+            ...material,
+            sourceSpotId: source?.spotId || null,
+            farmEffort: Number.isFinite(source?.effort) ? source.effort : null
+        })),
         next: next ? { spotId: next.spotId, npcId: next.npcId, npcName: next.npcName, kind: next.kind,
             sourceKind: next.sourceKind || next.kind, raidBoss: next.raidBoss === true,
             sharedEncounter: next.sharedEncounter === true,
@@ -2100,4 +2141,4 @@ function sameObjective(left, right) {
     );
 }
 
-module.exports = { RATE_MODEL_VERSION, DIRECT_FAILURE_RESOLVE_LIMIT, PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT, gradeForLevel, isCraftService, roleFor, itemScore, isRealCatalogItem, suitable, isSlotUpgrade, combatReadiness, progressionPriceCap, operationalAdenaReserve, equippedSlotsFor, equipInventoryUpgrades, preferredTarget, preferredDropTarget, preferredNoGradeTarget, marketOfferForTarget, marketPlanForTarget, marketRecoveryPlanForTarget, staticNpcUpgradePlan, staticNpcKitAdequate, npcWeaponBridgePlan, npcEquipmentBridgePlan, itemDropChance, itemDropYield, partyNeedForSource, partyNeedReasonForSource, soloSafeForSource, sourceEffort, sourceWithinVoluntaryHuntBand, bestSourceForState, bestSourceForPlan, safeFallbackForPlan, retargetPlanSource, replacementPlanFor, sourceForItem, farmSourceForMaterial, missingMaterials, directPlanFailure, partyRouteFailure, abandonAcquisition, replanContextFor, levelingRecoveryFor, rateProfileSignature, withinExpectedKillLimit, isBotEligibleSourceNpcId, isPlanSourceEligible, isPlanSourceViableForState, isClanOwnedPlan, equipmentTargetFulfilled, clanGoalPlanLocked, finalizePlan, planFor, shouldFinishPreviousPlan, scoreSpot, sameObjective };
+module.exports = { RATE_MODEL_VERSION, DIRECT_FAILURE_RESOLVE_LIMIT, PARTY_ROUTE_FAILURE_ATTEMPT_LIMIT, gradeForLevel, isCraftService, roleFor, itemScore, isRealCatalogItem, suitable, isSlotUpgrade, combatReadiness, progressionPriceCap, operationalAdenaReserve, equippedSlotsFor, equipInventoryUpgrades, preferredTarget, preferredDropTarget, preferredNoGradeTarget, marketOfferForTarget, marketPlanForTarget, fundedMarketPlanForTarget, marketRecoveryPlanForTarget, staticNpcUpgradePlan, staticNpcKitAdequate, npcWeaponBridgePlan, npcEquipmentBridgePlan, itemDropChance, itemDropYield, partyNeedForSource, partyNeedReasonForSource, soloSafeForSource, sourceEffort, sourceWithinVoluntaryHuntBand, bestSourceForState, bestSourceForPlan, safeFallbackForPlan, retargetPlanSource, replacementPlanFor, sourceForItem, farmSourceForMaterial, missingMaterials, withMaterialFarmEffort, directPlanFailure, partyRouteFailure, abandonAcquisition, replanContextFor, levelingRecoveryFor, rateProfileSignature, withinExpectedKillLimit, isBotEligibleSourceNpcId, isPlanSourceEligible, isPlanSourceViableForState, isClanOwnedPlan, equipmentTargetFulfilled, clanGoalPlanLocked, finalizePlan, planFor, shouldFinishPreviousPlan, scoreSpot, sameObjective };

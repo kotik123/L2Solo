@@ -4,6 +4,8 @@ require('../src/Global');
 
 const BotConversationStore = invoke('GameServer/Bot/AI/BotConversationStore');
 const BotRemoteChat = invoke('GameServer/Bot/AI/BotRemoteChat');
+const BotAfkTradeChat = invoke('GameServer/Bot/Economy/BotAfkTradeChat');
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const OpenRouterGateway = invoke('GameServer/Bot/AI/OpenRouterGateway');
 const LangfuseTracing = invoke('GameServer/Bot/AI/LangfuseTracing');
 const BotInferenceBudget = invoke('GameServer/Bot/AI/BotInferenceBudget');
@@ -111,6 +113,42 @@ async function main() {
         assert.strictEqual(requests[0].session_id, 'cold-bot:9102:player:9101');
         assert.strictEqual(requests[0].provider?.require_parameters, true);
 
+        const originalFindOwnerProjection = AfkTrade.findOwnerProjection;
+        const originalShopHandle = BotAfkTradeChat.handle;
+        try {
+            AfkTrade.findOwnerProjection = (ownerId) => Number(ownerId) === 9103
+                ? { session: {}, actor: { fetchPrivateStore: () => ({
+                    botOwned: true, storeType: 1, town: 'Giran',
+                    items: [{ selfId: 1962, name: 'Karmian Tunic Pattern', count: 2, price: 48750 }]
+                }) } } : originalFindOwnerProjection(ownerId);
+            BotAfkTradeChat.handle = async (_player, _state, intent) => ({
+                handled: true, ok: true, action: intent.action,
+                reply: 'Actual listing is 48750 Adena.'
+            });
+            OpenRouterGateway.setTransport(async (_url, init) => {
+                requests.push(JSON.parse(init.body));
+                return response({ choices: [{ message: { content: JSON.stringify({
+                    action: 'shop_status', reply: 'I changed it to 47000.',
+                    reason: 'inspect_listing', confidence: 0.95,
+                    shopItemId: null, shopQuantity: null, shopTotalPrice: null
+                }) } }] });
+            });
+            const shopState = { ...state, characterId: 9103, name: 'ColdShopBot' };
+            Memory.accept(MemoryPolicy.empty(shopState.characterId));
+            const shopReply = await BotRemoteChat.replyForState(playerSession, shopState,
+                'What can you do about this listing?');
+            assert.strictEqual(shopReply.reply, 'Actual listing is 48750 Adena.',
+                'shop action must use the server tool result, never the model claim');
+            const shopRequest = requests.at(-1);
+            assert.strictEqual(JSON.parse(shopRequest.messages[1].content).shop.items[0].selfId, 1962);
+            assert(shopRequest.response_format?.json_schema?.schema?.properties?.action?.enum?.includes('shop_offer')
+                || JSON.stringify(shopRequest).includes('shop_offer'),
+            'shop actions must be available in the cold chat schema');
+        } finally {
+            AfkTrade.findOwnerProjection = originalFindOwnerProjection;
+            BotAfkTradeChat.handle = originalShopHandle;
+        }
+
         const originalFindSessionByName = BotManager.findSessionByName;
         const originalRequestActivation = PopulationService.requestActivation;
         const hotSession = { accountId: 'bot_cold_chat', actor: actor(9102, 'ColdChatBot', 180) };
@@ -171,10 +209,10 @@ async function main() {
         assert.strictEqual(secondAdmission.delivered, true);
         assert.strictEqual(requests.length, beforeAdmissionRequests + 2, 'queued cold chat must reach OpenRouter after the slot is released');
         for (const stage of ['cold-bot.dialogue', 'bot.context.assemble', 'bot.reply.deliver']) {
-            assert.strictEqual(observations.filter((name) => name === stage).length, 5, `${stage} should be emitted for every cold reply`);
+            assert.strictEqual(observations.filter((name) => name === stage).length, 6, `${stage} should be emitted for every cold reply`);
         }
         for (const stage of ['openrouter.generation', 'bot.schema.validate']) {
-            assert.strictEqual(observations.filter((name) => name === stage).length, 5, `${stage} should be emitted for every admitted cold request`);
+            assert.strictEqual(observations.filter((name) => name === stage).length, 6, `${stage} should be emitted for every admitted cold request`);
         }
         assert.strictEqual(observations.filter((name) => name === 'bot.tool.come_to_player').length, 1, 'come_to_player should have one tool observation');
         console.log('Cold bot chat checks passed');

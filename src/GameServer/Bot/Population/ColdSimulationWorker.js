@@ -228,7 +228,8 @@ function startKernel(config = {}) {
                 && replanContext.routeCurrent
                 && !replanContext.failure
                 && state.stats?.partyRequest?.status === 'open'
-                && Number(state.stats.partyRequest.reviewAt || 0) > timestamp;
+                && Number(state.stats.partyRequest.reviewAt || 0) > timestamp
+                && !GearAcquisitionPlanner.fundedMarketPlanForTarget(state, previousPlan.target?.selfId, npcPlanningOptions);
             const upgradedPlan = availabilityPlan || (
                 reusablePartyRequest || clanGoalLocked
                     ? previousPlan
@@ -257,8 +258,9 @@ function startKernel(config = {}) {
             const finalizedPlan = preservePreviousPlan
                 ? previousPlan
                 : GearAcquisitionPlanner.finalizePlan(state, previousPlan, rawPlan, finalizationContext, timestamp);
+            const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(finalizedPlan, state, spots, { occupancy });
             const acquisitionPlan = {
-                ...finalizedPlan,
+                ...costedPlan,
                 marketFallback: finalizedPlan.status === 'active' && finalizedPlan.strategy === 'craft'
                     && Number(finalizedPlan.acquisitionProgress?.at || finalizedPlan.startedAt || timestamp) + 20 * 60 * 1000 <= timestamp
             };

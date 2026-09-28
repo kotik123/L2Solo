@@ -25,6 +25,7 @@ function beginMarketTravel(state, goal, timestamp = Date.now()) {
     const sellingInventory = goal.type === 'sell_inventory' && goal.plan?.expectedBenefit === 'market_sale_inventory';
     const forcedInventoryCleanup = sellingInventory && !!(goal.target?.cleanupReason || goal.plan?.cleanupReason);
     if (!buyingGear && !buyingMaterial && !sellingInventory) return null;
+    if (invoke('GameServer/Bot/Economy/BotAfkMarketService').canTradeRemotely(state, goal)) return null;
     if ((buyingGear || buyingMaterial) && Number(state.stats?.marketRetryAfter || 0) > timestamp) return null;
     if (sellingInventory && !forcedInventoryCleanup && Number(state.stats?.marketSellRetryAfter || 0) > timestamp) return null;
 

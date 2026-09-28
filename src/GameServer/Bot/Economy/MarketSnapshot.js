@@ -2,6 +2,7 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const StaticMerchantPricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
@@ -50,10 +51,18 @@ function snapshot() {
     const now = Date.now();
     const signalsByItem = MarketDemandIndex.indexSignals(states, now);
     const active = states.filter((state) => state.activity === 'merchant' && state.stats?.marketStore);
-    active.forEach((state) => {
-        const store = state.stats.marketStore;
+    const dynamicStores = [
+        ...active.map((state) => ({
+            storeType: state.stats.marketStore.storeType,
+            town: state.stats.marketStore.town || state.currentRegion,
+            items: state.stats.marketStore.items || []
+        })),
+        ...AfkTrade.activeShops().filter((shop) => String(shop.ownerAccount || '').startsWith('bot_'))
+            .map((shop) => ({ storeType: shop.storeType, town: shop.town, items: shop.lines || [] }))
+    ];
+    dynamicStores.forEach((store) => {
         const side = Number(store.storeType || 1) === 3 ? 'wtb' : 'wts';
-        const town = store.town || state.currentRegion || 'Unknown';
+        const town = store.town || 'Unknown';
         const townEntry = byTown[town] || emptyTown();
         townEntry[side === 'wts' ? 'dynamicWts' : 'dynamicWtb'] += 1;
         (store.items || []).forEach((line) => {
@@ -72,7 +81,9 @@ function snapshot() {
         byTown[store.town] = townEntry;
     });
 
-    const rankedItems = Array.from(items.values()).map((item) => {
+    const rankedItems = Array.from(items.values()).sort((left, right) => (
+        (right.wtbUnits + right.wtsUnits) - (left.wtbUnits + left.wtsUnits) || left.selfId - right.selfId
+    )).slice(0, 20).map((item) => {
         const demand = MarketDemandIndex.demandFor(item.selfId, {
             signals: signalsByItem.get(item.selfId) || [],
             now,
@@ -91,13 +102,11 @@ function snapshot() {
                 fundedUnits: demand.fundedUnits
             }
         };
-    }).sort((left, right) => (
-        (right.wtbUnits + right.wtsUnits) - (left.wtbUnits + left.wtsUnits) || left.selfId - right.selfId
-    ));
+    });
     return {
         dynamic: {
-            wts: active.filter((state) => Number(state.stats.marketStore.storeType || 1) === 1).length,
-            wtb: active.filter((state) => Number(state.stats.marketStore.storeType) === 3).length
+            wts: dynamicStores.filter((store) => Number(store.storeType || 1) === 1).length,
+            wtb: dynamicStores.filter((store) => Number(store.storeType) === 3).length
         },
         fixed: {
             wts: Object.values(MerchantStoreConfigs).filter((store) => Number(store?.storeType) === 1).length,
@@ -235,7 +244,7 @@ function afkStores(shops, itemsById) {
         if (!items.length) return [];
         return [storeRow({
             id: `afk:${Number(shop.id)}`,
-            source: 'afk_player',
+            source: String(shop.ownerAccount || '').startsWith('bot_') ? 'afk_bot' : 'afk_player',
             ownerId: shop.ownerId,
             ownerName: shop.ownerName,
             storeType: shop.storeType,

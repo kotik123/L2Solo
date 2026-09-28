@@ -37,7 +37,7 @@ function currentState(session, bot, town) {
 function liveMerchantOffer(offer) {
     return offer?.session?.actor && (
         (offer.sourceType === 'private_store' && String(offer.session.accountId || '').startsWith('bot_'))
-        || offer.sourceType === 'afk_player_store'
+        || ['afk_player_store', 'afk_bot_store'].includes(offer.sourceType)
     );
 }
 

@@ -19,7 +19,8 @@ let sequence = 0;
 
 function now() { return Date.now(); }
 
-function actorId(session) { return Number(session?.actor?.fetchId?.() || 0); }
+function actorId(session) { return Number(session?.afkTradeProjection && session?.botOwned
+    ? session.actor?.afkTradeOwnerId : session?.actor?.fetchId?.() || 0); }
 function actorName(session) { return session?.actor?.fetchName?.() || session?.accountId || 'unknown'; }
 
 function negotiationId(bot, player) {
@@ -29,7 +30,8 @@ function negotiationId(bot, player) {
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     return `negotiation-${actorId(bot)}-${actorId(player)}-${suffix}-${sequence}`;
 }
-function isBot(session) { return !!session?.accountId && String(session.accountId).startsWith('bot_'); }
+function isBot(session) { return !!session?.botOwned && !!session?.afkTradeProjection
+    || (!!session?.accountId && String(session.accountId).startsWith('bot_')); }
 function isPlayer(session) { return !!session?.actor && !isBot(session) && session.actor.fetchIsOnline?.() !== false; }
 
 function distance(a, b) {
@@ -326,11 +328,14 @@ function canAccess(bot, player) {
     if (!isBot(bot) || !isPlayer(player) || !bot.actor) return 'invalid_pair';
     if (!NEGOTIABLE_BOT_PLANS.has(bot.plan) && bot.partyCompanion !== true) return 'bot_not_trading';
     if (bot.partyCompanion === true && bot.followPlayerSession !== player) return 'not_authorized_relationship';
-    if (distance(bot.actor, player.actor) > 1500) return 'too_far';
+    if (!bot.afkTradeProjection && distance(bot.actor, player.actor) > 1500) return 'too_far';
     return null;
 }
 
 function canNegotiateStore(bot) {
+    if (bot?.afkTradeProjection && bot?.botOwned) {
+        return !!BotMerchantStoreService.storeFor(bot);
+    }
     return !!(bot?.coldMarketState?.stats?.marketStore && BotMerchantStoreService.storeFor(bot));
 }
 
@@ -424,6 +429,35 @@ function counterOffer(bot, player, totalPrice) {
 }
 
 async function republishAcceptedStore(bot, negotiation) {
+    if (bot?.afkTradeProjection && bot?.botOwned) {
+        const store = BotMerchantStoreService.storeFor(bot);
+        const line = BotMerchantStoreService.lineFor(store, negotiation.itemSelfId);
+        if (!line || Number(store?.revision) !== Number(negotiation.storeRevision)) {
+            return { ok: false, reason: 'store_changed', negotiation: summary(negotiation) };
+        }
+        bot.afkRepricing = true;
+        try {
+            const updated = await invoke('GameServer/AfkTrade/AfkTradeService').repriceBot(
+                bot.actor.afkTradeOwnerId, line.afkTradeLineId,
+                negotiation.currentUnitPrice, negotiation.storeRevision, negotiation.quantity
+            );
+            negotiation.state = 'completed';
+            negotiation.reason = 'store_reopened';
+            const result = summary(negotiation);
+            persist(negotiation);
+            audit(negotiation, 'completed', 'store_reopened', { storeRevision: updated?.revision });
+            clear(negotiation);
+            return { ok: true, reason: 'store_reopened', negotiation: result, store: updated };
+        } catch (error) {
+            negotiation.state = 'countered';
+            negotiation.reason = error.message;
+            negotiation.agreedTotalPrice = null;
+            persist(negotiation);
+            return { ok: false, reason: error.message, negotiation: summary(negotiation) };
+        } finally {
+            bot.afkRepricing = false;
+        }
+    }
     const reopened = await BotMerchantStoreService.republish(bot, {
         storeId: negotiation.storeId,
         storeRevision: negotiation.storeRevision,

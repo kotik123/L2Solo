@@ -9,8 +9,12 @@ const SELL = 1;
 const BUY = 3;
 const PROJECTION_ID_BASE = 900000000;
 const VISIBILITY_RADIUS = 6000;
+const VISIBILITY_CELL_SIZE = VISIBILITY_RADIUS;
 const projectionsById = new Map();
 const projectionsByOwner = new Map();
+const projectionsByCell = new Map();
+const pendingMatchContinuations = new Set();
+let matchGeneration = 0;
 const projectionOffersByType = new Map([
     [SELL, new Map()],
     [BUY, new Map()]
@@ -95,10 +99,33 @@ function projectionObjectId(shopId) {
     return id;
 }
 
+function visibilityCell(x, y) {
+    return `${Math.floor(Number(x) / VISIBILITY_CELL_SIZE)}:${Math.floor(Number(y) / VISIBILITY_CELL_SIZE)}`;
+}
+
+function indexLocation(projection) {
+    const key = visibilityCell(projection.actor.fetchLocX(), projection.actor.fetchLocY());
+    const members = projectionsByCell.get(key) || new Set();
+    members.add(projection);
+    projectionsByCell.set(key, members);
+    projection.visibilityCell = key;
+}
+
+function unindexLocation(projection) {
+    const key = projection?.visibilityCell;
+    const members = projectionsByCell.get(key);
+    if (!members) return;
+    members.delete(projection);
+    if (!members.size) projectionsByCell.delete(key);
+    projection.visibilityCell = null;
+}
+
 class ProjectionSession {
     constructor(shop) {
         this.accountId = `afk_trade_${shop.ownerId}`;
         this.afkTradeProjection = true;
+        this.botOwned = String(shop.ownerAccount || '').startsWith('bot_');
+        if (this.botOwned) this.plan = 'merchant';
         this.shopId = Number(shop.id);
         this.socket = { write() {}, resetAndDestroy() {} };
     }
@@ -113,6 +140,7 @@ function projectionStore(shop) {
     return {
         afkTrade: true,
         nativePlayerStore: true,
+        botOwned: String(shop.ownerAccount || '').startsWith('bot_'),
         budgetBacked: Number(shop.storeType) === BUY,
         shopId: Number(shop.id),
         ownerId: Number(shop.ownerId),
@@ -139,6 +167,10 @@ function buildProjection(shop) {
     const appearance = shop.appearance || {};
     const session = new ProjectionSession(shop);
     const store = projectionStore(shop);
+    if (store.botOwned) {
+        session.coldMarketState = { characterId: Number(shop.ownerId),
+            stats: { marketStore: { id: `afk:${shop.id}`, ...store } } };
+    }
     const appearanceItems = Array.isArray(appearance.items) ? appearance.items.map((item) => ({ ...item })) : [];
     if (Number(shop.storeType) === SELL) {
         store.items.forEach((line) => {
@@ -217,6 +249,10 @@ function removeProjection(ownerId) {
     const projection = projectionsByOwner.get(Number(ownerId));
     if (!projection) return false;
     unindexProjection(projection);
+    unindexLocation(projection);
+    if (projection.session.botOwned && !projection.session.afkRepricing) {
+        invoke('GameServer/Bot/Economy/BotNegotiationService').cleanup(projection.session, 'store_changed');
+    }
     invalidateTradeWindows(projection.actor);
     const objectId = projection.actor.fetchId();
     (World.user?.sessions || []).forEach((viewer) => {
@@ -237,6 +273,7 @@ function spawnProjection(shop) {
     projectionsByOwner.set(Number(shop.ownerId), projection);
     projectionsById.set(projection.actor.fetchId(), projection);
     indexProjection(projection);
+    indexLocation(projection);
     (World.user?.sessions || []).forEach((viewer) => {
         if (visibleTo(viewer, projection.actor)) sendProjection(viewer, projection);
     });
@@ -255,6 +292,10 @@ function refreshProjection(shop) {
     invalidateTradeWindows(actor);
     unindexProjection(projection);
     projection.shop = shop;
+    if (store.botOwned) {
+        projection.session.coldMarketState = { characterId: Number(shop.ownerId),
+            stats: { marketStore: { id: `afk:${shop.id}`, ...store } } };
+    }
     actor.setPrivateStore(store);
     actor.setPrivateStoreType(Number(shop.storeType));
     if (Number(shop.storeType) === SELL) {
@@ -278,11 +319,18 @@ function refreshProjection(shop) {
 function refreshVisibility(session, actor = session?.actor) {
     if (!session || !actor || isBotSession(session)) return 0;
     const visible = new Set();
-    projectionsById.forEach((projection, objectId) => {
-        if (!visibleTo(session, projection.actor)) return;
-        visible.add(objectId);
-        if (!session.knownAfkTradeIds?.has(objectId)) sendProjection(session, projection);
-    });
+    const centerX = Math.floor(Number(actor.fetchLocX()) / VISIBILITY_CELL_SIZE);
+    const centerY = Math.floor(Number(actor.fetchLocY()) / VISIBILITY_CELL_SIZE);
+    for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+            for (const projection of projectionsByCell.get(`${centerX + dx}:${centerY + dy}`) || []) {
+                const objectId = projection.actor.fetchId();
+                if (!visibleTo(session, projection.actor)) continue;
+                visible.add(objectId);
+                if (!session.knownAfkTradeIds?.has(objectId)) sendProjection(session, projection);
+            }
+        }
+    }
     session.knownAfkTradeIds ||= new Set();
     [...session.knownAfkTradeIds].forEach((objectId) => {
         if (visible.has(objectId) && projectionsById.has(objectId)) return;
@@ -379,6 +427,11 @@ async function syncColdCharacter(characterId, previousState, reason, rows = []) 
 async function finalizeTrade(result, kind, counterpartyId, previousState = null) {
     syncOnlineInventory(result.shop.ownerId, result.ownerInventory);
     syncOnlineInventory(counterpartyId, result.counterpartyInventory);
+    if (String(result.shop?.ownerAccount || '').startsWith('bot_')) {
+        const ownerState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(result.shop.ownerId);
+        await syncColdCharacter(result.shop.ownerId, ownerState,
+            `afk_trade_owner_${kind}`, result.ownerInventory);
+    }
     const coldState = await syncColdCharacter(
         counterpartyId,
         previousState,
@@ -387,6 +440,10 @@ async function finalizeTrade(result, kind, counterpartyId, previousState = null)
     );
     refreshProjection(result.shop);
     await notifyCommitted(result, kind);
+    if (String(result.shop?.ownerAccount || '').startsWith('bot_')
+        && Number(result.shop.storeType) === SELL) {
+        await invoke('GameServer/Bot/Economy/BotAfkMarketService').pruneResourceLots(result.shop.ownerId);
+    }
     return { ...result, coldState };
 }
 
@@ -397,9 +454,13 @@ function commandMessage(session, text) {
 async function stop(session) {
     const ownerId = Number(session?.actor?.fetchId?.() || session || 0);
     if (!ownerId) return { stopped: false };
+    const cachedState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId);
+    const ownerState = findOwnerProjection(ownerId)?.actor?.fetchPrivateStore?.()?.botOwned
+        || String(cachedState?.accountName || '').startsWith('bot_') ? cachedState : null;
     const result = await Database.closeAfkTradeShop(ownerId);
     removeProjection(ownerId);
     syncOnlineInventory(ownerId, result.ownerInventory);
+    if (ownerState) await syncColdCharacter(ownerId, ownerState, 'afk_trade_closed', result.ownerInventory);
     if (session?.actor) {
         session.afkTradeDraft = null;
         session.actor.setPrivateStoreType?.(0);
@@ -410,6 +471,126 @@ async function stop(session) {
         commandMessage(session, result.closed ? 'AFK trade stopped. Reserved assets returned.' : 'You do not have an active AFK trade.');
     }
     return { ...result, stopped: result.closed };
+}
+
+async function publishBot(ownerId, config) {
+    const characterId = Number(ownerId);
+    if (!characterId || ![SELL, BUY].includes(Number(config?.storeType))) {
+        throw new Error('invalid_bot_afk_trade');
+    }
+    const result = await Database.createAfkTradeShop(characterId, { ...config, replace: true });
+    syncOnlineInventory(characterId, result.ownerInventory);
+    const ownerState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(characterId);
+    if (ownerState) await syncColdCharacter(characterId, ownerState, 'bot_afk_trade_published', result.ownerInventory);
+    spawnProjection(result.shop);
+    return result.shop;
+}
+
+async function relocateBot(ownerId, town, loc) {
+    const projection = findOwnerProjection(ownerId);
+    if (!projection?.actor?.fetchPrivateStore?.()?.botOwned) throw new Error('bot_afk_trade_unavailable');
+    const shop = await Database.relocateBotAfkTradeShop(ownerId, town, loc);
+    spawnProjection(shop);
+    return shop;
+}
+
+async function repriceBot(ownerId, lineId, price, expectedRevision = null, quantity = null) {
+    const current = findOwnerProjection(ownerId);
+    if (!current?.actor?.fetchPrivateStore?.()?.botOwned) throw new Error('bot_afk_trade_unavailable');
+    const result = await Database.repriceAfkTradeShop(ownerId, lineId, price, expectedRevision, quantity);
+    syncOnlineInventory(ownerId, result.ownerInventory);
+    const ownerState = invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId);
+    if (ownerState) await syncColdCharacter(ownerId, ownerState, 'bot_afk_trade_repriced', result.ownerInventory);
+    invoke('GameServer/Bot/Economy/BotAfkMarketService').rememberInventory(ownerId,
+        invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId));
+    refreshProjection(result.shop);
+    await matchAfkOrders(ownerId);
+    return findOwnerProjection(ownerId)?.shop || null;
+}
+
+async function matchAfkOrders(ownerId, maxTrades = 64) {
+    const batchLimit = Math.max(1, Math.min(64, Math.floor(Number(maxTrades) || 64)));
+    const trades = [];
+    for (let attempt = 0; attempt < batchLimit; attempt++) {
+        const own = findOwnerProjection(ownerId);
+        const ownStore = own?.actor?.fetchPrivateStore?.();
+        if (!ownStore) break;
+        let pair = null;
+        for (const line of ownStore.items || []) {
+            const opposite = offers(line.selfId, ownStore.storeType === SELL ? BUY : SELL, {
+                characterId: ownerId
+            }).filter((offer) => (ownStore.botOwned || offer.store.botOwned)
+                && Number(offer.storeItem.enchant || 0) === Number(line.enchant || 0)
+                && (ownStore.storeType === SELL
+                    ? Number(offer.price) >= Number(line.price)
+                    : Number(offer.price) <= Number(line.price)))
+                .sort((left, right) => ownStore.storeType === SELL
+                    ? Number(right.price) - Number(left.price)
+                    : Number(left.price) - Number(right.price));
+            if (opposite.length) { pair = { line, offer: opposite[0] }; break; }
+        }
+        if (!pair) break;
+        const selling = ownStore.storeType === SELL;
+        const seller = selling ? ownStore : pair.offer.store;
+        const buyer = selling ? pair.offer.store : ownStore;
+        const sellLine = selling ? pair.line : pair.offer.storeItem;
+        const buyLine = selling ? pair.offer.storeItem : pair.line;
+        let trade;
+        try {
+            trade = await Database.matchAfkTradeShops({
+                sellerId: seller.ownerId, buyerId: buyer.ownerId,
+                sellShopId: seller.shopId, buyShopId: buyer.shopId,
+                sellLineId: sellLine.afkTradeLineId, buyLineId: buyLine.afkTradeLineId,
+                sellRevision: seller.revision, buyRevision: buyer.revision,
+                amount: Math.min(Number(sellLine.count), Number(buyLine.count))
+            });
+        } catch (error) {
+            if (['afk_trade_shop_changed', 'afk_trade_offer_changed', 'afk_trade_budget_changed'].includes(error.message)) break;
+            throw error;
+        }
+        syncOnlineInventory(seller.ownerId, trade.sellerInventory);
+        syncOnlineInventory(buyer.ownerId, trade.buyerInventory);
+        const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+        if (seller.botOwned) await syncColdCharacter(seller.ownerId, LifeState.snapshot(seller.ownerId),
+            'afk_trade_owner_sale', trade.sellerInventory);
+        if (buyer.botOwned) await syncColdCharacter(buyer.ownerId, LifeState.snapshot(buyer.ownerId),
+            'afk_trade_owner_purchase', trade.buyerInventory);
+        refreshProjection(trade.sellerShop);
+        refreshProjection(trade.buyerShop);
+        await notifyCommitted({ shop: trade.sellerShop, eventId: trade.sellerEventId,
+            line: trade.line, amount: trade.amount, totalPrice: trade.totalPrice }, 'sale');
+        await notifyCommitted({ shop: trade.buyerShop, eventId: trade.buyerEventId,
+            line: trade.line, amount: trade.amount, totalPrice: trade.totalPrice }, 'purchase');
+        trades.push(trade);
+    }
+    if (trades.length >= batchLimit && !pendingMatchContinuations.has(Number(ownerId))) {
+        const owner = Number(ownerId);
+        const generation = matchGeneration;
+        pendingMatchContinuations.add(owner);
+        setImmediate(() => {
+            pendingMatchContinuations.delete(owner);
+            if (generation !== matchGeneration) return;
+            matchAfkOrders(owner, batchLimit).catch((error) => {
+                utils.infoWarn('AfkTrade', 'continued matching failed for %d: %s', owner, error.message);
+            });
+        });
+    }
+    return { matched: trades.length > 0, trades };
+}
+
+function activeLocations(town, excludedOwnerId = 0) {
+    return [...projectionsByOwner.values()]
+        .filter((projection) => projection.shop?.town === town
+            && Number(projection.shop.ownerId) !== Number(excludedOwnerId))
+        .map((projection) => ({
+            locX: Number(projection.shop.locX),
+            locY: Number(projection.shop.locY),
+            locZ: Number(projection.shop.locZ)
+        }));
+}
+
+function activeShops() {
+    return [...projectionsByOwner.values()].map((projection) => projection.shop);
 }
 
 async function begin(session, storeType) {
@@ -481,6 +662,7 @@ async function activate(session, store) {
         spawnProjection(created.shop);
         let matched = null;
         try {
+            await matchAfkOrders(actor.fetchId());
             matched = await invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService')
                 .matchAfkPlayerShop(actor.fetchId());
         } catch (error) {
@@ -556,11 +738,13 @@ function offers(selfId, storeType, options = {}) {
         const line = store.items.find((entry) => Number(entry.selfId) === Number(selfId) && Number(entry.count) > 0);
         if (!line) return [];
         return [{
-            sourceType: storeType === SELL ? 'afk_player_store' : 'afk_player_buy_store',
+            sourceType: storeType === SELL
+                ? (store.botOwned ? 'afk_bot_store' : 'afk_player_store')
+                : (store.botOwned ? 'afk_bot_buy_store' : 'afk_player_buy_store'),
             sourceId: Number(store.ownerId),
             sourceName: projection.actor.fetchName(),
-            sellerKind: 'player',
-            playerPriority: true,
+            sellerKind: store.botOwned ? 'bot' : 'player',
+            playerPriority: !store.botOwned,
             town: store.town || town,
             selfId: Number(line.selfId),
             itemName: line.name || itemName(line.selfId),
@@ -585,10 +769,12 @@ function activeDemandSelfIds() {
 async function init() {
     projectionsById.clear();
     projectionsByOwner.clear();
+    projectionsByCell.clear();
     projectionOffersByType.forEach((byItem) => byItem.clear());
     const shops = await Database.fetchAfkTradeShops(null, { activeOnly: true });
     shops.forEach((shop) => spawnProjection(shop));
     if (shops.length) utils.infoSuccess('AfkTrade', 'restored %d persistent AFK shops', shops.length);
+    await invoke('GameServer/Bot/Economy/BotAfkMarketService').migrateRestoredShops();
     return shops.length;
 }
 
@@ -598,6 +784,12 @@ async function matchBotDemand() {
 
     const summaries = [];
     for (const ownerId of [...projectionsByOwner.keys()]) {
+        const peer = await matchAfkOrders(ownerId);
+        if (peer.matched) summaries.push({
+            trades: peer.trades,
+            itemCount: peer.trades.reduce((sum, trade) => sum + Number(trade.amount || 0), 0),
+            adena: peer.trades.reduce((sum, trade) => sum + Number(trade.totalPrice || 0), 0)
+        });
         const summary = await invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService')
             .matchAfkPlayerShop(ownerId);
         if (summary?.matched) summaries.push(summary);
@@ -622,6 +814,9 @@ async function matchBotDemand() {
 module.exports = {
     BUY,
     SELL,
+    activeLocations,
+    activeShops,
+    relocateBot,
     activeDemandSelfIds,
     activate,
     begin,
@@ -631,14 +826,20 @@ module.exports = {
     findProjection,
     init,
     matchBotDemand,
+    matchAfkOrders,
     offers,
+    publishBot,
+    repriceBot,
     refreshVisibility,
     sellToShop,
     stop,
     _resetForTests() {
+        matchGeneration += 1;
+        pendingMatchContinuations.clear();
         [...projectionsByOwner.keys()].forEach(removeProjection);
         projectionsById.clear();
         projectionsByOwner.clear();
+        projectionsByCell.clear();
         projectionOffersByType.forEach((byItem) => byItem.clear());
     }
 };

@@ -46,6 +46,46 @@ async function parityAndIntegration() {
             assert.equal(expected.market.sourceType, 'private_store');
             assert.equal(expected.market.price, 10, 'a buyer must not plan to buy from its own cheaper cold shop');
             assert.deepEqual(await worker.plan({ member, spots: [], warehouseRows: [], options: {}, context: marketContext }, DataCache), expected);
+
+            const swordLine = { selfId: 79, price: 78600000, count: 1 };
+            world.user = { sessions: [{ accountId: 'test-seller', actor: {
+                fetchId: () => 990011, fetchName: () => 'Sword Seller',
+                fetchPrivateStore: () => ({ storeType: 1, town: 'Heine', items: [swordLine] })
+            } }] };
+            const swordMember = { characterId: 990003, level: 55, classId: 21, phase: 'cold',
+                adena: 20000000, inventory: {}, stats: { classId: 21, equipmentPlan: {
+                    status: 'active', strategy: 'market', target: { selfId: 79, slot: 7 },
+                    market: { town: 'Heine', price: 78600000, sourceType: 'private_store' },
+                    clanGoal: { clanId: 77, goalKey: 'clan-equipment:77:990003:79:7' }
+                } } };
+            const swordContext = await Runtime.context();
+            const unfunded = planForMember(swordMember);
+            assert.notEqual(unfunded.strategy === 'market' && unfunded.target?.selfId === 79, true,
+                'an unaffordable listing must release a retained clan market goal');
+            assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
+                options: {}, context: swordContext }, DataCache), unfunded);
+
+            swordLine.price = 10000000;
+            const affordableContext = { ...swordContext, offers: swordContext.offers.map((offer) => (
+                offer.selfId === 79 && offer.sourceId === 990011 ? { ...offer, price: swordLine.price } : offer
+            )) };
+            const repriced = planForMember(swordMember);
+            assert.equal(repriced.strategy, 'market');
+            assert.equal(repriced.target.selfId, 79, 'the funded listing must retain the requested sword');
+            assert.equal(repriced.market.price, swordLine.price,
+                'a funded listing must update the retained target price');
+            assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
+                options: {}, context: affordableContext }, DataCache), repriced);
+
+            swordLine.count = 0;
+            const soldOutContext = { ...affordableContext, offers: affordableContext.offers.filter((offer) => (
+                offer.selfId !== 79 || offer.sourceId !== 990011
+            )) };
+            const soldOut = planForMember(swordMember);
+            assert.notEqual(soldOut.strategy === 'market' && soldOut.target?.selfId === 79, true,
+                'a sold-out listing must release the clan goal');
+            assert.deepEqual(await worker.plan({ member: swordMember, spots: [], warehouseRows: [],
+                options: {}, context: soldOutContext }, DataCache), soldOut);
         } finally {
             world.user = oldUser;
             market.removeColdStore(990002);

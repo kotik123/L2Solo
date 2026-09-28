@@ -63,6 +63,7 @@ function calculate(member, spots = [], warehouseRows = [], options = {}) {
     } : member;
     const existing = existingPlanFor(planningMember);
     const state = plannerState(planningMember);
+    const marketBudget = Math.max(0, state.adena - GearAcquisitionPlanner.operationalAdenaReserve(state));
     const plannerOptions = {
         spots,
         clanCrafting: true,
@@ -70,6 +71,7 @@ function calculate(member, spots = [], warehouseRows = [], options = {}) {
         ...(options.recipeId ? { recipeId: options.recipeId } : {}),
         allowedRecipeIds: options.allowedRecipeIds ? new Set(options.allowedRecipeIds) : undefined,
         maxExpectedKills: number(options.maxExpectedKills, Config.equipmentMaxExpectedKills),
+        maxMarketPrice: marketBudget,
         spoilCapable: options.spoilCapable === true,
         allowRaidSources: options.allowRaidSources === true,
         ...(options.occupancy ? { occupancy: options.occupancy } : {}),
@@ -79,16 +81,28 @@ function calculate(member, spots = [], warehouseRows = [], options = {}) {
         ...(options.excludedTargetIds ? { excludedTargetIds: options.excludedTargetIds } : {})
     };
     try {
+        if (existing?.strategy === 'market') {
+            // Reprice only this target against the already captured market snapshot.
+            // An unfunded or sold-out listing must not lock the clan's goal.
+            const current = GearAcquisitionPlanner.marketPlanForTarget(
+                state, number(existing.target?.selfId), plannerOptions
+            );
+            if (current) return {
+                ...existing,
+                market: current.market,
+                expectedKills: current.expectedKills,
+                expectedEffort: current.expectedEffort ?? current.expectedKills,
+                rateModelVersion: GearAcquisitionPlanner.RATE_MODEL_VERSION,
+                rateProfileSignature: GearAcquisitionPlanner.rateProfileSignature()
+            };
+            return GearAcquisitionPlanner.planFor({
+                ...state,
+                stats: { ...state.stats, equipmentPlan: undefined }
+            }, plannerOptions);
+        }
         const rateProfileCurrent = !existing
             || Number(existing.rateModelVersion || 0) >= GearAcquisitionPlanner.RATE_MODEL_VERSION
                 && String(existing.rateProfileSignature || '') === GearAcquisitionPlanner.rateProfileSignature();
-        if (existing?.strategy === 'market' && !rateProfileCurrent) {
-            const refreshed = GearAcquisitionPlanner.planFor(state, {
-                ...plannerOptions,
-                forceMarketTargetId: existing.strategy === 'market' ? number(existing.target?.selfId) : null
-            });
-            if (Policy.isAcquisitionPlan(refreshed)) return refreshed;
-        }
         if (existing?.strategy === 'direct_drop' && !rateProfileCurrent) {
             // Route economics are part of the rate model. Reconsider the
             // target as well as the dropper so an old cheap-looking raid does
