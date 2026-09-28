@@ -46,7 +46,9 @@ function receivedHit(session, actor, npc, hit, options = {}) {
     if (options.wakeSleep !== false) {
         EffectRestrictions.wakeOnDamage(npc, session);
     }
-    npc.setHp(Math.max(0, npc.fetchHp() - hit)); // HP bar would disappear if less than zero
+    // Immortal town staff keep taking hits, but their HP floor stops at 1 so
+    // the death pipeline below can only run for killable templates.
+    npc.setHp(Math.max(npc.fetchImmortalMinHp?.() ?? 0, npc.fetchHp() - hit)); // HP bar would disappear if less than zero
     npc.broadcastVitals();
 
     if (npc.fetchHp() <= 0) {

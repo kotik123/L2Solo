@@ -32,6 +32,7 @@ const tests = [
     'tests/test_bot_acquisition_recovery.js',
     'tests/test_bot_leveling_recovery.js',
     'tests/test_npc_passive_retaliation.js',
+    'tests/test_town_npc_immortality.js',
     'tests/test_player_transition_recovery.js',
     'tests/test_heine_npcs.js',
     'tests/test_goddard_rune_npcs.js',
