@@ -2,15 +2,22 @@ const Config = invoke('GameServer/Bot/Population/PopulationConfig');
 const Voice = invoke('GameServer/Bot/AI/BotChatVoice');
 const Speech = invoke('GameServer/Bot/AI/BotSpeechTemplates');
 const Identity = invoke('GameServer/Bot/AI/BotServiceIdentity');
+const AfkTradeChatSelection = invoke('GameServer/Bot/Economy/AfkTradeChatSelection');
 const ItemTemplateIndex = require('../../Item/ItemTemplateIndex');
 
 const MAX_PENDING = 64;
 const HISTORY_LIMIT = 2048;
 const PENDING_TTL_MS = 5 * 60000;
+const AFK_RECHECK_MS = 30000;
 const pending = new Map();
 const history = new Map();
+const lastItemAt = new Map();
+const lastTownAt = new Map();
 let nextGlobalAt = 0;
 let nextFlushAt = 0;
+let nextAfkScanAt = 0;
+let lastDeliveryType = null;
+let afkAdsSent = 0;
 
 function id(source) { return Number(source?.actor?.fetchId?.() || source?.characterId || 0); }
 function price(value) {
@@ -86,6 +93,17 @@ function offerText(store, source = {}) {
     return Voice.line(`trade.${side}`, source, { goods: lines.join(', '), town });
 }
 
+function afkOfferText(shop, line) {
+    const name = label(line);
+    if (!name) return '';
+    const side = Number(shop.storeType) === 3 ? 'WTB' : 'WTS';
+    const town = String(shop.town || 'town').replace(/[{}_]/g, '').slice(0, 30);
+    const suffix = ` x${Number(line.count)} — ${Number(line.price).toLocaleString('en-US')} Adena ea, ${town}. PM me.`;
+    const room = 120 - side.length - 1 - suffix.length;
+    if (room < 8) return '';
+    return `${side} ${name.length > room ? `${name.slice(0, room - 3).trimEnd()}...` : name}${suffix}`;
+}
+
 function ready(source, now = Date.now()) {
     return Config.marketTradeChatEnabled !== false && !Identity.isStaticService(source) && id(source) > 0 &&
         now >= nextGlobalAt && now - (history.get(id(source))?.at ?? -Infinity) >= Config.marketTradeChatIntervalMs;
@@ -106,6 +124,28 @@ function deliver(source, text, now = Date.now()) {
     if (!history.has(id(source)) && history.size >= HISTORY_LIMIT) history.delete(history.keys().next().value);
     history.set(id(source), { at: now, text });
     nextGlobalAt = now + Config.marketTradeChatGlobalMinIntervalMs;
+    lastDeliveryType = source.afkTradeAd ? 'afk' : 'merchant';
+    return true;
+}
+
+function announceAfk(now) {
+    if (now < nextAfkScanAt) return false;
+    nextAfkScanAt = now + AFK_RECHECK_MS;
+    const shops = invoke('GameServer/AfkTrade/AfkTradeService').activeShops();
+    const preferredSide = afkAdsSent % 3 === 2 ? 3 : 1;
+    const candidate = AfkTradeChatSelection.choose(shops, {
+        now, lastItemAt, lastOwnerAt: history, lastTownAt, preferredSide
+    });
+    if (!candidate) return false;
+    const { shop, line, type } = candidate;
+    const source = { characterId: Number(shop.ownerId), name: shop.ownerName || 'Bot', afkTradeAd: true };
+    const text = afkOfferText(shop, line);
+    if (!deliver(source, text, now)) return false;
+    const key = AfkTradeChatSelection.itemKey(type, line);
+    if (!lastItemAt.has(key) && lastItemAt.size >= HISTORY_LIMIT) lastItemAt.delete(lastItemAt.keys().next().value);
+    lastItemAt.set(key, now);
+    lastTownAt.set(String(shop.town), now);
+    afkAdsSent += 1;
     return true;
 }
 
@@ -123,6 +163,10 @@ function flush(now = Date.now(), immediate = false) {
     nextFlushAt = now + 1000;
     if (Config.marketTradeChatEnabled === false) { pending.clear(); return; }
     if (now < nextGlobalAt) return;
+    if (!players().length) return;
+    // AFK shops share the existing global chat budget. Inspect their in-memory
+    // projections only when a message slot opens, never on every bot tick.
+    if (lastDeliveryType !== 'afk' && announceAfk(now)) return;
     for (const [characterId, entry] of pending) {
         const source = freshSource(entry, now);
         const current = source && snapshot(source, now);
@@ -132,6 +176,7 @@ function flush(now = Date.now(), immediate = false) {
         pending.delete(characterId);
         if (deliver(source, text, now)) return;
     }
+    if (lastDeliveryType === 'afk') announceAfk(now);
 }
 
 function offer(source, now = Date.now()) {
@@ -162,5 +207,8 @@ function safe(fn) {
 }
 
 module.exports = { price, offerText, ready, deliver, offer: safe(offer), flush: safe(flush), MAX_PENDING, PENDING_TTL_MS,
-    snapshot: () => ({ pending: pending.size, history: history.size }),
-    reset() { pending.clear(); history.clear(); nextGlobalAt = 0; nextFlushAt = 0; } };
+    snapshot: () => ({ pending: pending.size, history: history.size, afkItemHistory: lastItemAt.size }),
+    reset() { pending.clear(); history.clear(); lastItemAt.clear(); lastTownAt.clear();
+        nextGlobalAt = 0; nextFlushAt = 0;
+        nextAfkScanAt = 0;
+        lastDeliveryType = null; afkAdsSent = 0; } };
