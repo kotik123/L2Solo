@@ -54,7 +54,10 @@ global.utils = {
     },
 
     stripNull(value) {
-        return value.toString('ascii').replace(/\u0000/gi, '');
+        // `String.prototype.toString` ignores its arguments, so decoding has to be
+        // explicit or a raw byte string keeps its high bytes as latin-1 characters.
+        const text = Buffer.isBuffer(value) ? value.toString('latin1') : String(value);
+        return text.replace(/\u0000/g, '');
     },
 
     sqrt(value) {
