@@ -13,6 +13,9 @@ function itemIdsForSource(source) {
     if (source === 'pet:food') return available([...new Set(Object.values(TYPES).flatMap(type => type.food))]);
     if (source === 'pet:equipment') return available(Object.keys(gear).map(Number));
     if (source === 'pet:summons') return available(Object.keys(TYPES).map(Number).filter(id => id !== 4425));
+    if (source === 'tattoo:dyes') return DataCache.items
+        .filter((item) => item.template?.kind === 'Other.Tattoo')
+        .map((item) => item.selfId);
 
     const match = typeof source === 'string' ? source.match(/^(armor|weapon):(none|d|c|b|a|s)$/) : null;
     if (match) {

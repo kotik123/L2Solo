@@ -253,6 +253,34 @@ for (const [category, itemIds] of Object.entries(expectedSupplyGroups)) {
     });
 }
 
+// Tattoo supplies follow the henna system: 180 stat dyes resolve from the live
+// item base, and the 13 decorative C4 tattoos stay an explicit bodypart set.
+assert.strictEqual(adminShop['tattoo-dyes'], 'tattoo:dyes', 'tattoo-dyes should resolve from the live item datapack');
+const dyeShopIds = AdminShop.itemIdsForSource(adminShop['tattoo-dyes']);
+assert.strictEqual(dyeShopIds.length, 180, 'the dye shop should sell every C4 henna dye');
+dyeShopIds.forEach((selfId) => {
+    const dye = others.find((item) => item.selfId === selfId);
+    assert.ok(dye && dye.template.kind === 'Other.Tattoo', `dye shop item ${selfId} should be a tattoo dye`);
+});
+const tattooShopIds = AdminShop.itemIdsForSource(adminShop['tattoo-armor']);
+assert.deepStrictEqual(tattooShopIds, [485, 486, 487, 488, 489, 490, 491, 492, 493, 494, 495, 496, 2410], 'the tattoo shop should sell all 13 decorative C4 tattoos');
+tattooShopIds.forEach((selfId) => {
+    assert.ok(armors.some((item) => item.selfId === selfId), `tattoo item ${selfId} should exist in the armor datapack`);
+});
+assert.ok(adminShopHtml.includes('admin-shop tattoo-dyes'), 'equipment shop should expose the henna dye supplies');
+assert.ok(adminShopHtml.includes('admin-shop tattoo-armor'), 'equipment shop should expose the decorative tattoos');
+
+let dyeListPacket = null;
+AdminShop({
+    actor: { backpack: { fetchTotalAdena: () => 0 } },
+    dataSendToMe(packet) { dyeListPacket = packet; }
+}, ['admin-shop', 'tattoo-dyes']);
+assert.ok(dyeListPacket, 'admin shop should send a BuyList packet for tattoo dyes');
+assert.strictEqual(dyeListPacket.readInt16LE(9), 180, 'dye shop BuyList should list all 180 henna dyes');
+for (let i = 0; i < dyeListPacket.readInt16LE(9); i++) {
+    assert.strictEqual(dyeListPacket.readInt32LE(11 + (i * 32) + 28), 0, 'tattoo dyes must remain free');
+}
+
 const expectedEnchantGroups = {
     'enchant-weapon-normal': [955, 951, 947, 729, 959],
     'enchant-weapon-blessed': [6575, 6573, 6571, 6569, 6577],

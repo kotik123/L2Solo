@@ -37,4 +37,9 @@ assert.strictEqual(BotTradeService.offerBotItem(bot, 311, 5).ok, true, 'released
 bot.activeTrade.expiresAt = Date.now() - 1;
 assert.strictEqual(BotTradeService.activeTradeSummary(bot), null, 'expired trade must close');
 assert.strictEqual(bot.botTradeReservations.size, 0, 'expiry must release reservations');
+let movementStops = 0;
+bot.actor.automation = { abortAll: () => { movementStops += 1; } };
+assert.strictEqual(BotTradeService.startPlayerTrade(player, bot).ok, true);
+assert.strictEqual(movementStops, 1, 'opening a player trade stops the bot before it travels away');
+BotTradeService.cancel(bot, 'test_cleanup', false);
 console.log('Bot trade reservation checks passed');

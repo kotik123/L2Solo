@@ -256,40 +256,83 @@ function ensureCharacterStock(characterId, options = {}) {
     });
 }
 
-function purchaseActorRestock(actor, options = {}) {
+async function purchaseActorRestock(actor, options = {}) {
     if (!actor?.backpack || typeof actor.fetchId !== 'function') {
-        return Promise.resolve({ ok: false, reason: 'missing_actor' });
+        return { ok: false, reason: 'missing_actor' };
     }
 
     const targetAmount = Number(options.targetAmount || PURCHASE_TARGET_AMOUNT);
     const plan = options.plan || planForActor(actor);
     const currentAmount = shotAmount(actor, plan);
     const missingAmount = Math.max(0, targetAmount - currentAmount);
-    if (missingAmount <= 0) return Promise.resolve({ ok: true, changed: false, plan, amount: currentAmount, cost: 0 });
+    if (missingAmount <= 0) return { ok: true, changed: false, plan, amount: currentAmount, cost: 0 };
 
-    const unitPrice = Math.max(0, Number(plan.price || 0));
+    const staticPrice = invoke('GameServer/Bot/Economy/StaticMerchantPricing')
+        .cheapestPurchase(plan.selfId);
+    const unitPrice = Number.isFinite(staticPrice) ? Math.max(1, Number(plan.price || 0), staticPrice)
+        : Math.max(1, Number(plan.price || 0));
     const fullCost = missingAmount * unitPrice;
     const adenaItem = actor.backpack.fetchItemFromSelfId(57);
-    const adena = Number(adenaItem?.fetchAmount ? adenaItem.fetchAmount() : 0);
+    let adena = Number(adenaItem?.fetchAmount ? adenaItem.fetchAmount() : 0);
+    let remaining = missingAmount;
+    let marketCost = 0;
+    const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+    const offers = AfkTrade.offers(plan.selfId, AfkTrade.SELL, { characterId: actor.fetchId() })
+        .filter((offer) => Number(offer.price) > 0 && Number(offer.price) < unitPrice && Number(offer.count) > 0)
+        .sort((a, b) => Number(a.price) - Number(b.price)).slice(0, 4);
+    for (const offer of offers) {
+        const quantity = Math.min(remaining, Number(offer.count), Math.floor(adena / Number(offer.price)));
+        if (quantity <= 0) continue;
+        try {
+            await AfkTrade.buyFromShop(actor.fetchId(), offer.store, plan.selfId, quantity,
+                { expectedPrice: Number(offer.price) });
+            marketCost += quantity * Number(offer.price);
+            remaining -= quantity;
+            adena = Number(actor.backpack.fetchItemFromSelfId(57)?.fetchAmount?.() || 0);
+        } catch (_) {
+            // An AFK listing may change between selection and purchase.
+        }
+        if (remaining <= 0) break;
+    }
+    if (remaining <= 0) return { ok: true, changed: true, plan, amount: targetAmount, delta: missingAmount, cost: marketCost };
+
     const affordableAmount = unitPrice > 0 ? Math.floor(adena / unitPrice) : missingAmount;
-    const delta = Math.min(missingAmount, affordableAmount);
-    if (!adenaItem || delta <= 0) {
-        return Promise.resolve({ ok: false, reason: 'not_enough_adena', plan, cost: fullCost, adena });
+    const delta = Math.min(remaining, affordableAmount);
+    const currentAdenaItem = actor.backpack.fetchItemFromSelfId(57);
+    if (!currentAdenaItem || delta <= 0) {
+        return marketCost > 0
+            ? { ok: true, changed: true, plan, amount: targetAmount - remaining, delta: missingAmount - remaining, cost: marketCost, adena }
+            : { ok: false, reason: 'not_enough_adena', plan, cost: fullCost, adena };
     }
 
     const cost = delta * unitPrice;
     const nextAdena = adena - cost;
-    const nextAmount = currentAmount + delta;
-    return Database.updateItemAmount(actor.fetchId(), adenaItem.fetchId(), nextAdena)
+    const nextAmount = targetAmount - remaining + delta;
+    return Database.updateItemAmount(actor.fetchId(), currentAdenaItem.fetchId(), nextAdena)
         .then(() => {
-            adenaItem.setAmount(nextAdena);
+            currentAdenaItem.setAmount(nextAdena);
             return ensureActorStock(actor, { targetAmount: nextAmount, plan });
         })
-        .then((result) => ({ ok: true, ...result, cost, adena: nextAdena }));
+        .then((result) => ({ ok: true, ...result, cost: marketCost + cost, adena: nextAdena }));
 }
 
 function needsActorRestock(actor, threshold = 0) {
     return shotAmount(actor) <= Number(threshold || 0);
+}
+
+function restockTarget(actor, town, excludedIds = []) {
+    const excluded = new Set(excludedIds.map(Number));
+    const offers = invoke('GameServer/Bot/Economy/MarketOpportunity')
+        .hotOffers(planForActor(actor).selfId, { town, buyerCharacterId: actor.fetchId() });
+    for (const offer of offers) {
+        if (excluded.has(Number(offer.sourceId)) || Number(offer.sourceId) === Number(actor.fetchId())) continue;
+        if (offer.sellerKind !== 'fixed' && !String(offer.sourceType).startsWith('afk_')) continue;
+        const seller = offer.projection?.actor || offer.session?.actor;
+        if (!seller) continue;
+        return { actorId: seller.fetchId(), sourceId: Number(offer.sourceId), name: offer.sourceName,
+            locX: seller.fetchLocX(), locY: seller.fetchLocY(), locZ: seller.fetchLocZ(), town };
+    }
+    return null;
 }
 
 function describe(plan) {
@@ -298,6 +341,7 @@ function describe(plan) {
 }
 
 module.exports = {
+    restockTarget,
     DEFAULT_TARGET_AMOUNT,
     PURCHASE_TARGET_AMOUNT,
     SOULSHOT_IDS,

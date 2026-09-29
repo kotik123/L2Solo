@@ -2,6 +2,7 @@ const ServerResponse = invoke('GameServer/Network/Response');
 const Item           = invoke('GameServer/Item/Item');
 const DataCache      = invoke('GameServer/DataCache');
 const NpcShopBuyLists = invoke('GameServer/World/Generics/NpcShopBuyLists');
+const NpcShopPriceScale = require('../NpcShopPriceScale');
 
 module.exports = function(session, parts) {
     session.activeMerchantTrade = null;
@@ -36,7 +37,11 @@ module.exports = function(session, parts) {
             const nextId = invoke('GameServer/World/Generics/NpcTalkResponse').items.nextId++;
             const row = utils.crushOb(item);
             row.amount = 0;
-            if (entry.price !== undefined) row.price = entry.price;
+            row.price = entry.price !== undefined ? entry.price : NpcShopPriceScale.price(
+                row.template?.price || row.price,
+                invoke('GameServer/ProgressionRates').profile().multiplier
+            );
+            prices.set(entry.selfId, row.price);
             list.push(new Item(nextId, row));
         });
     });

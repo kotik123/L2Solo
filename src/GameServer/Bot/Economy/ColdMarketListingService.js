@@ -11,6 +11,7 @@ const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const GeodataEngine = invoke('GameServer/Geodata/GeodataEngine');
 const StaticBuyerService = invoke('GameServer/Bot/Economy/StaticBuyerService');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const MarketBuyerActivity = invoke('GameServer/Bot/Economy/MarketBuyerActivity');
 const BuyStoreService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService');
 const BotMerchantStoreService = invoke('GameServer/Bot/Economy/BotMerchantStoreService');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
@@ -152,6 +153,11 @@ function staticMerchantStalls(townName, isValidStall) {
         .filter(isValidStall);
 }
 
+function activeAfkStalls(townName, characterId, isValidStall) {
+    return invoke('GameServer/AfkTrade/AfkTradeService')
+        .activeLocations(townName, characterId).filter(isValidStall);
+}
+
 function isFreeGiranPlazaStall(loc, occupied) {
     return isGiranPlazaStallLocation(loc)
         && !occupied.some((other) => distance2d(loc, other) < GIRAN_STALL_MIN_DISTANCE);
@@ -160,6 +166,7 @@ function isFreeGiranPlazaStall(loc, occupied) {
 function occupiedGiranPlazaStalls(characterId) {
     return [
         ...staticMerchantStalls('Giran', isGiranPlazaStallLocation),
+        ...activeAfkStalls('Giran', characterId, isGiranPlazaStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && (
@@ -184,6 +191,7 @@ function isGludioDMarketStallLocation(loc) {
 function occupiedGludioDStalls(characterId) {
     return [
         ...staticMerchantStalls('Gludio', isGludioDMarketStallLocation),
+        ...activeAfkStalls('Gludio', characterId, isGludioDMarketStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -229,6 +237,7 @@ function isDionDMarketStallLocation(loc) {
 function occupiedDionDStalls(characterId) {
     return [
         ...staticMerchantStalls('Dion', isDionDMarketStallLocation),
+        ...activeAfkStalls('Dion', characterId, isDionDMarketStallLocation),
         ...LifeState.allStates(2000)
             .filter((state) => Number(state.characterId) !== Number(characterId)
                 && state.activity === 'merchant'
@@ -277,6 +286,7 @@ function isTalkingIslandNoGradeStallLocation(loc) {
 function occupiedTalkingIslandNoGradeStalls(characterId) {
     return [
         ...staticMerchantStalls('Talking Island', isTalkingIslandNoGradeStallLocation),
+        ...activeAfkStalls('Talking Island', characterId, isTalkingIslandNoGradeStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -318,6 +328,7 @@ function isElvenVillageNoGradeStallLocation(loc) {
 function occupiedElvenVillageNoGradeStalls(characterId) {
     return [
         ...staticMerchantStalls('Elven Village', isElvenVillageNoGradeStallLocation),
+        ...activeAfkStalls('Elven Village', characterId, isElvenVillageNoGradeStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -359,6 +370,7 @@ function isDarkElvenVillageNoGradeStallLocation(loc) {
 function occupiedDarkElvenVillageNoGradeStalls(characterId) {
     return [
         ...staticMerchantStalls('Dark Elven Village', isDarkElvenVillageNoGradeStallLocation),
+        ...activeAfkStalls('Dark Elven Village', characterId, isDarkElvenVillageNoGradeStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -400,6 +412,7 @@ function isOrcVillageNoGradeStallLocation(loc) {
 function occupiedOrcVillageNoGradeStalls(characterId) {
     return [
         ...staticMerchantStalls('Orc Village', isOrcVillageNoGradeStallLocation),
+        ...activeAfkStalls('Orc Village', characterId, isOrcVillageNoGradeStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -441,6 +454,7 @@ function isDwarvenVillageNoGradeStallLocation(loc) {
 function occupiedDwarvenVillageNoGradeStalls(characterId) {
     return [
         ...staticMerchantStalls('Dwarven Village', isDwarvenVillageNoGradeStallLocation),
+        ...activeAfkStalls('Dwarven Village', characterId, isDwarvenVillageNoGradeStallLocation),
         ...LifeState.allStates(2000)
         .filter((state) => Number(state.characterId) !== Number(characterId)
             && state.activity === 'merchant'
@@ -507,11 +521,21 @@ function marketLocation(town, options) {
     return town?.center ? { ...town.center } : { ...(options.state?.loc || {}) };
 }
 
-function preTradeNpcCleanup(state, forcedCleanup = {}, timestamp = Date.now()) {
-    const candidates = ItemDisposition.npcLiquidationCandidates(state, {
+function marketAwareNpcCandidates(state, options = {}) {
+    const market = MarketListingPolicy.evaluate(state, {
         unlimited: true,
-        allowPreTradeCleanup: true
-    });
+        allowPreTradeCleanup: options.allowPreTradeCleanup === true
+    }).npc;
+    const chosen = new Set(market.map((item) => Number(item.selfId)));
+    return market.concat(ItemDisposition.npcLiquidationCandidates(state, options).filter((item) => {
+        const kind = String(item.kind || '');
+        return !kind.startsWith('Weapon.') && !kind.startsWith('Armor.')
+            && !chosen.has(Number(item.selfId));
+    }));
+}
+
+function preTradeNpcCleanup(state, forcedCleanup = {}, timestamp = Date.now()) {
+    const candidates = marketAwareNpcCandidates(state, { allowPreTradeCleanup: true });
     const clearedState = {
         ...state,
         stats: {
@@ -552,7 +576,7 @@ function open(state, options = {}) {
     if (Number(state.stats?.marketSellRetryAfter || 0) > timestamp) {
         if (!options.forcedCleanup) return Promise.resolve({ state, listed: false, reason: 'sell_retry_cooldown' });
         // Cleanup may bypass the travel delay, but must not open another WTS.
-        return preTradeNpcCleanup(state, options.forcedCleanup, timestamp).then((cleanup) => (
+        return MarketBuyerActivity.refresh().then(() => preTradeNpcCleanup(state, options.forcedCleanup, timestamp)).then((cleanup) => (
             BotWarehouse.depositCold({
                 ...cleanup.state,
                 stats: { ...cleanup.state.stats, marketSellRetryAfter: state.stats.marketSellRetryAfter }
@@ -566,7 +590,7 @@ function open(state, options = {}) {
             marketSellRetryAfter: timestamp + SELL_RETRY_DELAY_MS
         }
     });
-    return ColdSafeEnchantService.enchantSafe(state, options)
+    return MarketBuyerActivity.refresh().then(() => ColdSafeEnchantService.enchantSafe(state, options))
         .then((enchantResult) => LifeState.learnCraftableRecipes(enchantResult.state || state))
         .then((preparedState) => {
     state = preparedState || state;
@@ -750,10 +774,11 @@ function closeSellStore(state, timestamp, reason) {
         timing: { ...(state.timing || {}), nextResolveAt: timestamp }
     };
     MarketOpportunity.removeColdStore(state.characterId);
-    return (hasStock ? BotWarehouse.depositCold(nextState) : Promise.resolve({ state: nextState, count: 0 }))
+    return MarketBuyerActivity.refresh().then(() => (
+        hasStock ? BotWarehouse.depositCold(nextState) : Promise.resolve({ state: nextState, count: 0 })))
         .then((warehouse) => {
             const storedState = warehouse.state || nextState;
-            const liquidated = hasStock ? ItemDisposition.npcLiquidationCandidates(storedState) : [];
+            const liquidated = hasStock ? marketAwareNpcCandidates(storedState) : [];
             return LifeState.applyNpcLiquidation(storedState, liquidated).then((liquidatedState) => ({
                 state: liquidatedState || storedState,
                 warehouseCount: warehouse.count || 0,

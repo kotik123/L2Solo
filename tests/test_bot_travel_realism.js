@@ -390,11 +390,10 @@ try {
         say(_session, text) { unreachableShopMessages.push(text); },
         getClosestTown: () => ({ name: 'Dion', x: 1000, y: 1000, z: -100 })
     });
-    assert.strictEqual(unreachableShopSession.plan, 'shopping',
-        'an exhausted synthetic shop route should switch to a real current-town merchant');
-    assert(unreachableShopSession.shoppingTarget.npcSelfId,
-        'the replacement restock target must be a catalogued NPC');
-    assert.strictEqual(unreachableShopSession.shoppingTarget.town, 'Dion');
+    assert.strictEqual(unreachableShopSession.plan, 'following',
+        'unreachable shot shopping without a static seller must return to following');
+    assert.strictEqual(unreachableShopSession.roleDecision.reason, 'shopping_route_unreachable',
+        'ordinary NPC shops no longer provide a replacement shot route');
 
     const buyerTarget = {
         actorId: 9001,

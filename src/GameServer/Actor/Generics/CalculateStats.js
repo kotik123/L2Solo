@@ -6,7 +6,9 @@ const C4GradePenalty = invoke('GameServer/Items/C4GradePenalty');
 
 function effectiveBaseStat(actor, stat, fallback) {
     const base = Number(fallback()) || 0;
-    const added = base + EffectStats.add(actor, stat);
+    // Henna symbols rewrite base stats directly, before buffs and multipliers.
+    const henna = Number(actor?.hennaStats?.[stat]) || 0;
+    const added = base + henna + EffectStats.add(actor, stat);
     return Math.max(1, Math.round(added * EffectStats.multiplier(actor, `${stat}Mul`)));
 }
 

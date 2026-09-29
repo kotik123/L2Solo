@@ -446,6 +446,12 @@ const World = {
 
         const hotSession = BotManager.findSessionByName(lookup);
         if (hotSession) {
+            const marketState = LifeState.snapshot(hotSession.actor?.fetchId?.());
+            const marketChat = invoke('GameServer/Bot/Economy/BotAfkTradeChat');
+            if (marketState && marketChat.parse(marketState, message, session)) {
+                return BotRemoteChat.replyForState(session, marketState, message, source)
+                    .then((result) => result?.ok === true && result.delivered === true);
+            }
             return BotDialogueArbiter.route({
                 playerSession: session,
                 botSession: hotSession,

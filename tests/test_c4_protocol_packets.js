@@ -192,6 +192,40 @@ invoke('GameServer/PrivateStore').publishSell = (_session, packaged, rows) => { 
 GameRequest.privateStoreListSell({}, privateStoreSellWithC4Tail);
 invoke('GameServer/PrivateStore').publishSell = originalPublishPrivateStoreSell;
 assert.deepStrictEqual(capturedPrivateStoreSell, { packaged: false, rows: [{ objectId: 70001, count: 1, price: 1000 }] }, 'C4 private sell publish should accept optional trailing fields');
+const privateSaleRows = [
+    { objectId: 71001, selfId: 1988, count: 1, price: 72863, referencePrice: 9715, enchant: 0 },
+    { objectId: 71002, selfId: 4057, count: 1, price: 63635, referencePrice: 8485, enchant: 0 },
+    { objectId: 71003, selfId: 4065, count: 2, price: 55770, referencePrice: 7436, enchant: 3 }
+];
+const privateSaleItems = new Map(privateSaleRows.map((row) => [row.objectId, {
+    fetchClass2: () => 5,
+    fetchId: () => row.objectId,
+    fetchSelfId: () => row.selfId,
+    fetchAmount: () => row.count,
+    fetchEquipped: () => false,
+    fetchEnchantLevel: () => row.enchant,
+    fetchPrice: () => row.referencePrice,
+    isWearable: () => false
+}]));
+const privateSaleSeller = {
+    fetchId: () => 900000783,
+    fetchPrivateStore: () => ({ packageSale: false, items: privateSaleRows }),
+    backpack: { fetchItemRaw: (id) => privateSaleItems.get(id) }
+};
+const privateSalePacket = ServerResponse.privateStoreListSell(privateSaleSeller,
+    { backpack: { fetchTotalAdena: () => 13929055 } });
+assert.strictEqual(privateSalePacket[0], 0x9b);
+assert.strictEqual(privateSalePacket.readInt32LE(13), 3);
+privateSaleRows.forEach((row, index) => {
+    const offset = 17 + index * 34;
+    assert.strictEqual(privateSalePacket.readInt32LE(offset + 4), row.objectId);
+    assert.strictEqual(privateSalePacket.readInt32LE(offset + 8), row.selfId,
+        'each C4 private-sale row must start after the previous reference price');
+    assert.strictEqual(privateSalePacket.readInt32LE(offset + 12), row.count);
+    assert.strictEqual(privateSalePacket.readInt16LE(offset + 18), row.enchant);
+    assert.strictEqual(privateSalePacket.readInt32LE(offset + 26), row.price);
+    assert.strictEqual(privateSalePacket.readInt32LE(offset + 30), row.referencePrice);
+});
 assert.strictEqual(GameOpcodes.table[0xb6], GameRequest.recipeShopMakeItem, 'C4 RequestRecipeShopMakeItem opcode should be wired');
 assert.strictEqual(GameOpcodes.table[0xb7], GameRequest.recipeShopManagePrev, 'C4 RequestRecipeShopManagePrev opcode should be wired');
 assert.strictEqual(GameOpcodes.table[0x2b], GameRequest.dismissParty, 'C4 RequestWithDrawalParty should be wired to 0x2b');

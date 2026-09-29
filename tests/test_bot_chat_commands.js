@@ -16,6 +16,7 @@ const BotSocialMemory = invoke('GameServer/Bot/AI/BotSocialMemory');
 const Generics = invoke(path.actor);
 const SkillModel = invoke('GameServer/Model/Skill');
 const EffectStore = invoke('GameServer/Effects/EffectStore');
+const BuffService = invoke('GameServer/Bot/Economy/BuffService');
 
 function fakeActor(id, name, options = {}) {
     const actor = {
@@ -70,6 +71,7 @@ const originalSetTimeout = global.setTimeout;
 const originalRecordEvent = BotSocialMemory.recordEvent;
 const originalSkillExec = Generics.skillExec;
 const originalBotTell = BotManager.botTell;
+const originalBuffQuote = BuffService.quote;
 
 try {
     global.setTimeout = (fn) => {
@@ -172,71 +174,19 @@ try {
     assert.deepStrictEqual(tankReplies, [], 'a bot without friendly support skills must ignore a direct buff request');
     BotManager.botTell = originalBotTell;
 
-    const buffer = fakeActor(2000008, 'FighterWithBuff', { classId: 0, mp: 40, locX: 100 });
-    buffer.skillset.skills.push(new SkillModel({
-        selfId: 1068,
-        name: 'Might',
-        level: 2,
-        passive: false,
-        spell: true,
-        hp: 0,
-        mp: 10,
-        hitTime: 1000,
-        reuse: 1000,
-        power: 0,
-        distance: 600
-    }));
+    const buffer = fakeActor(2000008, 'Prophet', { classId: 17, mp: 100, locX: 100 });
     const bufferSession = fakeSession('bot_buffer', buffer);
-    const supportReplies = [];
-    BotManager.botTell = (_botSession, _playerSession, text) => supportReplies.push(text);
+    const quotes = [];
+    BuffService.quote = (targetSession, sourceSession) => {
+        quotes.push({ targetSession, sourceSession });
+        return { ok: true, price: 100 };
+    };
     supportCast = null;
     BotManager.handleDirectSupportRequest(bufferSession, playerSession, 100, { buff: true });
-    assert.deepStrictEqual(supportCast, {
-        id: player.fetchId(),
-        selfId: 1068,
-        ctrl: false
-    }, 'a bot with a learned friendly buff should cast it for an eligible role');
-    supportReplies.length = 0;
+    assert.strictEqual(supportCast, null, 'direct buff request must not cast before payment');
+    assert.deepStrictEqual(quotes, [{ targetSession: playerSession, sourceSession: bufferSession }]);
+    BuffService.quote = originalBuffQuote;
 
-    EffectStore.apply(player, {
-        key: 'might', id: 1068, level: 2, type: 'buff', stats: { pAtkMul: 1.12 }, durationMs: 20 * 60 * 1000
-    });
-    supportCast = null;
-    BotManager.handleDirectSupportRequest(bufferSession, playerSession, 100, { buff: true });
-    assert.strictEqual(supportCast, null, 'do not overwrite an active equal-level support buff');
-    assert.deepStrictEqual(supportReplies, [
-        'You already have the party buffs I can improve: Might.'
-    ], 'the bot should name the already-active buff instead of claiming it has nothing to offer');
-
-    EffectStore.remove(player, 'might');
-    player.supportReservations = {};
-    const lowerMpBuffer = fakeActor(2000009, 'LowerMpBuffer', { classId: 0, mp: 40, locX: 100 });
-    const higherMpBuffer = fakeActor(2000010, 'HigherMpBuffer', { classId: 0, mp: 50, locX: 100 });
-    [lowerMpBuffer, higherMpBuffer].forEach((caster) => caster.skillset.skills.push(new SkillModel({
-        selfId: 1068, name: 'Might', level: 1, passive: false, spell: true, hp: 0, mp: 10, hitTime: 1000, reuse: 1000, power: 0, distance: 600
-    })));
-    const lowerMpSession = fakeSession('bot_lower_mp', lowerMpBuffer);
-    const higherMpSession = fakeSession('bot_higher_mp', higherMpBuffer);
-    lowerMpSession.partyCompanion = true;
-    lowerMpSession.followPlayerSession = playerSession;
-    higherMpSession.partyCompanion = true;
-    higherMpSession.followPlayerSession = playerSession;
-    BotManager.sessions = [lowerMpSession, higherMpSession];
-    supportReplies.length = 0;
-    supportCast = null;
-    BotManager.handleDirectSupportRequest(lowerMpSession, playerSession, 100, { buff: true });
-    assert.strictEqual(supportCast, null, 'a lower-MP bot should wait when a party peer owns the same buff');
-    BotManager.handleDirectSupportRequest(higherMpSession, playerSession, 100, { buff: true });
-    assert.deepStrictEqual(supportCast, {
-        id: player.fetchId(), selfId: 1068, ctrl: false
-    }, 'the highest-MP party bot should cast the shared requested buff');
-    assert.deepStrictEqual(supportReplies, [], 'a requested buff must not claim success before the native cast lands');
-    assert.strictEqual(
-        higherMpSession.pendingPartyChatResult?.skillId,
-        1068,
-        'the selected provider should retain a pending factual confirmation for the native cast result'
-    );
-    BotManager.botTell = originalBotTell;
 
     const socialEvents = [];
     BotSocialMemory.recordEvent = (fromSession, botSession, eventName, detail) => {
@@ -272,6 +222,7 @@ try {
     BotSocialMemory.recordEvent = originalRecordEvent;
     Generics.skillExec = originalSkillExec;
     BotManager.botTell = originalBotTell;
+    BuffService.quote = originalBuffQuote;
     if (options.default.OpenRouter) options.default.OpenRouter.enabled = originalOpenRouterEnabled;
     options.default.AI = originalAI;
 }

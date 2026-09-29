@@ -46,6 +46,9 @@ for (const kind of ['Citizen', 'Merchant', 'Teleporter', 'Guild Coach', 'Guild M
         assert.strictEqual(npc.timer.combat, undefined);
         assert.deepStrictEqual(packets, [], `${kind}: must not start attacking or chasing`);
         assert.deepStrictEqual([npc.fetchLocX(), npc.fetchLocY(), npc.fetchLocZ()], [0, 0, 0]);
+        receivedHit(session, actor, npc, npc.fetchMaxHp());
+        assert.strictEqual(npc.fetchHp(), 1, `${kind}: lethal damage must clamp at 1 HP`);
+        assert.strictEqual(npc.state.fetchDead(), false, `${kind}: must stay immortal`);
     } finally {
         npc.destructor(session);
     }

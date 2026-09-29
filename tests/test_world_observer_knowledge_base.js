@@ -67,6 +67,18 @@ try {
     ])), { weaknesses: ['bow'], hpMultiplier: 3 });
 
     const shortSword = service.itemDetail(1);
+    assert.deepStrictEqual(service.itemOverview(1), {
+        id: shortSword.id,
+        name: shortSword.name,
+        kind: shortSword.kind,
+        category: shortSword.category,
+        grade: shortSword.grade,
+        price: shortSword.price,
+        iconUrl: shortSword.iconUrl,
+        hasDropSources: shortSword.hasDropSources,
+        hasSpoilSources: shortSword.hasSpoilSources,
+        sourceCount: shortSword.sourceCount
+    });
     const blackWolf = shortSword.sources.drops.find((npc) => npc.id === 317);
     assert.strictEqual(blackWolf.chancePercent, 0.6187);
 

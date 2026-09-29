@@ -80,6 +80,12 @@ Database.init();
     const warmup = await LifeState.coldPartyCandidateProjections();
     assert.strictEqual(warmup.length, 1776, 'warmup query must cover the complete eligible pool');
     assert.strictEqual(new Set(warmup.map((state) => state.spotId)).size, 24, 'projection must not starve smaller spots');
+    const source = fs.readFileSync(path.join(rootDir, 'src/GameServer/Bot/Population/BotLifeState.js'), 'utf8');
+    const candidateSql = source.slice(source.indexOf('coldPartyCandidateProjections()'))
+        .match(/`SELECT[\s\S]*?`/)[0].slice(1, -1).replace('${TABLE}', 'bot_life_state');
+    const plan = await Database.execute([`EXPLAIN QUERY PLAN ${candidateSql}`, []]);
+    assert(plan.some(row => row.detail.includes('COVERING INDEX bot_life_state_party_candidate_projection')),
+        'candidate filtering must not pull large life-state JSON back into the projection query');
 
     const durations = [];
     for (let run = 0; run < 7; run += 1) {

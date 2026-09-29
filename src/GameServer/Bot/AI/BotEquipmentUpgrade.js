@@ -350,9 +350,11 @@ function refreshAfterEquipment(session, upgrades) {
     // A weapon upgrade can change both the grade and the compatible shot kind.
     // Restock and re-enable after equipping; bots cannot send a client hotbar
     // toggle themselves.
-    ShotStock.ensureActorStock(actor)
-        .then(() => ShotStock.enableAutoShot(actor))
-        .catch((error) => utils.infoWarn('BotGear', 'failed to refresh shots for %s: %s', actor.fetchName(), error.message));
+    if (upgrades.some(({ slot }) => [7, 14].includes(Number(slot)))) {
+        ShotStock.purchaseActorRestock(actor, { targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT })
+            .then(() => ShotStock.enableAutoShot(actor))
+            .catch((error) => utils.infoWarn('BotGear', 'failed to refresh shots for %s: %s', actor.fetchName(), error.message));
+    }
 
     session.lastEquipmentUpgradeAt = Date.now();
 

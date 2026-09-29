@@ -194,31 +194,8 @@ function distance2d(a, b) {
 }
 
 function applyBuffTarget(session, bot, decision, targetSession) {
-    const target = targetSession?.actor;
-    const buffType = String(decision.buffType || '').toLowerCase();
-    if (!target) return { applied: false, reason: 'invalid_buff_target' };
-    const skill = BotSkillCapabilities.buffSkill(bot, buffType);
-    const semantic = skill?.fetchSemantic?.() || {};
-    const targetKind = semantic.target || skill?.fetchTargetKind?.();
-    if (!skill || (targetKind && !['friendly', 'ally', 'party'].includes(targetKind))) {
-        return { applied: false, reason: 'buff_not_learned' };
-    }
-    if (bot.fetchMp() < skill.fetchConsumedMp()) return { applied: false, reason: 'low_mp_for_buff' };
-    if (distance2d(bot, target) > 900) return { applied: false, reason: 'target_too_far' };
-    if (!BotSupportPlanner.canPlanSupportAction(target, bot, skill, [{ actor: target, leader: true }])) {
-        return { applied: false, reason: 'buff_capacity' };
-    }
-
-    const BotPartyChat = invoke('GameServer/Bot/AI/BotPartyChat');
-    BotPartyChat.expectSkillResult(session, {
-        target,
-        targetSession,
-        skill,
-        kind: 'support'
-    });
-    BotSupportPlanner.queueSupportCast(session, { provider: bot, target, skill });
-    invoke(path.actor).skillExec(session, bot, { id: target.fetchId(), selfId: skill.fetchSelfId(), ctrl: false });
-    return { applied: true, reason: `buff_requested:${buffType}` };
+    const offer = invoke('GameServer/Bot/Economy/BuffService').quote(targetSession, session);
+    return { applied: offer.ok === true, reason: offer.ok ? 'buff_quote' : 'buff_unavailable' };
 }
 
 function clearChatArrival(session, reason) {
@@ -894,7 +871,7 @@ function registerTools() {
         shop: 'Go to town for normal restock behavior.',
         fetch_resources: 'For a party leader request, buy an exact new quantity of an item from the server-owned city shop catalog, return beside the leader, and offer that purchased quantity in native trade.',
         move_to_spot: 'Move to one of the provided candidate spot ids.',
-        buff_target: 'Apply a supported buff to a visible player if class, MP, and range allow it.',
+        buff_target: 'Quote this buffer\'s useful learned buffs to a visible player and open a payment trade. Clanmates pay nothing.',
         set_buff_policy: 'Temporarily allow, deny, or clear one learned friendly buff in the support rotation.',
         heal_target: 'Heal a visible player if class, MP, and range allow it.',
         set_pull_policy: 'Set the party pull permission and mode for this companion, with a bounded hot-session expiry.',

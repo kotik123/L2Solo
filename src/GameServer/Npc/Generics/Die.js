@@ -11,6 +11,9 @@ function clearEffectsOnDeath(npc) {
 
 function die(session, actor, npc) {
     if (npc.state?.fetchDead?.()) return;
+    // Defense in depth for the immortality rule in Model/Npc: no other code
+    // path may turn a town NPC that stays alive at 1 HP into a corpse.
+    if (npc.fetchIsKillable?.() === false) return;
     const SpoilSweep = invoke('GameServer/Npc/SpoilSweep');
     const RaidBossMinionManager = invoke('GameServer/World/RaidBossMinionManager');
 

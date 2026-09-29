@@ -177,10 +177,6 @@ function schema(allowedActions = BotAgentTools.ACTIONS, session = null) {
                 type: 'string',
                 description: 'Candidate spot id for move_to_spot, or empty string.'
             },
-            buffType: {
-                type: 'string',
-                description: 'Exact learned friendly buff effect or name from bot.skills.support.availableBuffs for buff_target.'
-            },
             buffPolicyType: {
                 type: 'string',
                 description: 'Exact learned friendly buff effect or name for set_buff_policy.'
@@ -328,8 +324,8 @@ function systemPrompt(session = null) {
         'follow_player only means approach a visible player unless the bot is already an invited party companion.',
         'For a whole-party request such as everybody come closer or regroup, use regroup_party once. For everyone stay here, use stay_party once. Both control all current companions server-side; never answer as if only this bot moved.',
         'For a non-party follow request, say that you are on your way unless the authoritative distance is already near the player; never claim to be beside them before arrival.',
-        'For buff_target and heal_target, choose a visible player and let the server validate class, learned skill, MP, range, and safety.',
-        'Do not claim that buffs or heals are ready in a plain chat reply. Use buff_target or heal_target; only the validated server action may confirm a cast.',
+        'For buff_target, choose a visible player and request a server-priced buff quote; the server opens a payment trade for the player. Clanmates are buffed for free.',
+        'For heal_target, choose a visible player and let the server validate class, learned skill, MP, range, and safety. Do not claim a completed heal in a plain chat reply.',
         'When the player asks to stop, allow, or exclude one learned buff from the support rotation, use set_buff_policy with the exact effect/name from bot.skills.support.availableBuffs and mode deny, allow, or clear. Do not claim a rotation changed after a plain say.',
         'Party pull, skill preference, stance, and equipment tools are temporary hot-session controls. They require the current human party leader; never invent authority.',
         'Pull permission, pull mode, and assigned puller are separate. Unassigning one puller returns to the existing automatic policy and does not globally disable pulling.',

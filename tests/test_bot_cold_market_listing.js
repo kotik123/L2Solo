@@ -36,6 +36,7 @@ const originals = {
     reconcileBotClanMembership: Database.reconcileBotClanMembership,
     execute: Database.execute,
     fetchItems: Database.fetchItems,
+    fetchMarketBuyerActivity: Database.fetchMarketBuyerActivity,
     fetchWarehouseItems: Database.fetchWarehouseItems,
     updateItemAmount: Database.updateItemAmount,
     updateItemEquipState: Database.updateItemEquipState,
@@ -58,6 +59,7 @@ async function run() {
         { id: 21, selfId: marketItem.selfId, amount: 1, equipped: false, slot: marketItem.etc.slot },
         { id: 22, selfId: equippedItem.selfId, amount: 1, equipped: true, slot: equippedItem.etc.slot }
     ]);
+    Database.fetchMarketBuyerActivity = () => Promise.resolve([]);
     Database.fetchWarehouseItems = () => Promise.resolve([]);
     Database.updateItemAmount = (characterId, id, amount) => {
         calls.push({ type: 'amount', characterId, id, amount });
@@ -509,6 +511,7 @@ run().catch((err) => {
     Database.reconcileBotClanGoals = originalReconcileClanGoals;
     Database.execute = originals.execute;
     Database.fetchItems = originals.fetchItems;
+    Database.fetchMarketBuyerActivity = originals.fetchMarketBuyerActivity;
     Database.fetchWarehouseItems = originals.fetchWarehouseItems;
     Database.updateItemAmount = originals.updateItemAmount;
     Database.updateItemEquipState = originals.updateItemEquipState;

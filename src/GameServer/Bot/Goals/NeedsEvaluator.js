@@ -6,6 +6,7 @@ const GearLifecycle = invoke('GameServer/Bot/AI/GearLifecycle');
 const PersonaEconomicPolicy = invoke('GameServer/Bot/Economy/PersonaEconomicPolicy');
 const WealthInvestmentPolicy = invoke('GameServer/Bot/Economy/WealthInvestmentPolicy');
 const ProgressionCap = invoke('GameServer/Progression/ProgressionCap');
+const ProgressionRates = invoke('GameServer/ProgressionRates');
 
 const RANK_ORDER = ['none', 'd', 'c', 'b', 'a', 's'];
 const NPC_GEAR_PRIORITY = {
@@ -262,10 +263,40 @@ function evaluate(state = {}, options = {}) {
     }
 
     const craftPlan = state.stats?.equipmentPlan;
-    const plannedMaterial = craftPlan?.marketFallback && craftPlan?.next?.itemId
+    const marketMaterial = craftPlan?.status === 'active' && craftPlan?.strategy === 'craft'
+        && Number(state.stats?.marketRetryAfter || 0) <= timestamp
+        ? (() => {
+            const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
+            const reserved = Number(AfkTrade.findOwnerProjection(state.characterId)?.shop?.escrowAdena || 0);
+            const adena = Number(state.adena || 0) + reserved;
+            const spendable = Math.max(0, adena
+                - Math.max(500, Number(state.level || 1) * 250, Math.ceil(adena * 0.1)));
+            const adenaPerKill = Math.max(20, Number(state.level || 1) * 25)
+                * ProgressionRates.profile().adena;
+            // Clan beneficiaries can spend a modest premium to finish a shared
+            // equipment goal sooner; personal crafting keeps a savings margin.
+            const farmPriceFactor = craftPlan.clanGoal?.clanId ? 1.35 : 0.9;
+            return (craftPlan.materials || []).flatMap((material) => {
+                const missing = Math.max(0, Number(material.amount || 0)
+                    - Number(state.inventory?.[material.selfId]?.amount || 0));
+                const farmEffort = Number(material.farmEffort);
+                const estimatedMissing = Math.max(1, Number(material.missing || missing));
+                if (!missing || !Number.isFinite(farmEffort) || farmEffort <= 0) return [];
+                const farmEffortPerItem = farmEffort / estimatedMissing;
+                return AfkTrade.offers(material.selfId, AfkTrade.SELL,
+                    { characterId: state.characterId })
+                    .filter((offer) => Number(offer.count) > 0 && Number(offer.price) > 0
+                        && Number(offer.price) <= spendable
+                        && Number(offer.price) / adenaPerKill <= farmEffortPerItem * farmPriceFactor)
+                    .map((offer) => ({ material, missing, offer,
+                        savings: (farmEffortPerItem - Number(offer.price) / adenaPerKill)
+                            * Math.min(missing, Number(offer.count)) }));
+            }).sort((a, b) => b.savings - a.savings || a.offer.price - b.offer.price)[0] || null;
+        })() : null;
+    const plannedMaterial = marketMaterial?.material || (craftPlan?.marketFallback && craftPlan?.next?.itemId
         ? craftPlan.materials?.find((material) => Number(material.selfId) === Number(craftPlan.next.itemId))
             || { selfId: Number(craftPlan.next.itemId), amount: Number(craftPlan.next.requiredTotal || craftPlan.next.amount || 1) }
-        : null;
+        : null);
     const wantedMaterial = plannedMaterial ? {
         ...plannedMaterial,
         missing: plannedMaterial.amount === undefined ? Number(plannedMaterial.missing || 0)
@@ -280,7 +311,10 @@ function evaluate(state = {}, options = {}) {
                 itemName: (state.inventory?.[String(wantedMaterial.selfId)] || {}).name || `Material ${wantedMaterial.selfId}`,
                 amount: Number(wantedMaterial.missing)
             },
-            plan: { kind: 'market_buy', expectedBenefit: 'market_buy_craft_material', recipeId: craftPlan.recipeId },
+            plan: { kind: 'market_buy', expectedBenefit: 'market_buy_craft_material', recipeId: craftPlan.recipeId,
+                ...(marketMaterial ? { marketTown: marketMaterial.offer.town,
+                    priceSource: 'offer', estimatedCost: Number(marketMaterial.offer.price),
+                    sourceType: marketMaterial.offer.sourceType } : {}) },
             blockers: [],
             nextReviewAt: timestamp + 10 * 60 * 1000
         });

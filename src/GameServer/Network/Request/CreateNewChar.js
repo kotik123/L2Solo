@@ -38,36 +38,43 @@ function createNewChar(session, buffer) {
 function consume(session, data) {
     Database.fetchCharacterName(data.name).then((rows) => {
         if (rows[0]) {
-            session.dataSendToMe(
+            return session.dataSendToMe(
                 ServerResponse.charCreateFail(0x02)
             );
         }
-        else {
-            Shared.fetchClassInformation(data.classId).then((classInfo) => {
-                const spawns = fetchSpawnPoints(data.classId);
-                const coords = spawns[utils.randomNumber(utils.size(spawns))];
-        
-                data = {
-                    ...data, ...classInfo.vitals, ...coords
-                };
-        
-                Database.createCharacter(session.accountId, data).then((packet) => {
-                    session.dataSendToMe(
-                        ServerResponse.charCreateSuccess()
-                    );
-        
-                    const charId = Number(packet.insertId);
-                    awardBaseSkills   (charId, data.classId);
-                    awardBaseGear     (charId, data.classId);
-                    awardBaseShots    (charId, data.classId);
-                    awardBaseShortcuts(charId, data.classId);
-        
-                    Shared.fetchCharacters(session.accountId).then((characters) => {
-                        Shared.enterCharacterHall(session, characters);
-                    });
+
+        return Shared.fetchClassInformation(data.classId).then((classInfo) => {
+            const spawns = fetchSpawnPoints(data.classId);
+            const coords = spawns[utils.randomNumber(utils.size(spawns))];
+
+            data = {
+                ...data, ...classInfo.vitals, ...coords
+            };
+
+            return Database.createCharacter(session.accountId, data).then((packet) => {
+                session.dataSendToMe(
+                    ServerResponse.charCreateSuccess()
+                );
+
+                const charId = Number(packet.insertId);
+                awardBaseSkills   (charId, data.classId);
+                awardBaseGear     (charId, data.classId);
+                awardBaseShots    (charId, data.classId);
+                awardBaseShortcuts(charId, data.classId);
+
+                return Shared.fetchCharacters(session.accountId).then((characters) => {
+                    Shared.enterCharacterHall(session, characters);
                 });
             });
-        }
+        });
+    }).catch((error) => {
+        // A rejected promise nobody handles takes the whole server down. The
+        // client only ever sees a failed creation.
+        utils.infoWarn('Character', 'failed to create %s: %s', data.name, error.message);
+
+        session.dataSendToMe(
+            ServerResponse.charCreateFail(0x00)
+        );
     });
 }
 

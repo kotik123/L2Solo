@@ -42,13 +42,19 @@ class Server {
 
         // Generates a new `Session` for the respective `Server`. Either `AuthSession` or `GameSession`
         const session = this.callback(socket);
-        socket.on('data', packetReceiver(
-            session.dataReceive.bind(session),
-            (packetSize) => {
-                utils.infoWarn(this.name, 'invalid packet size %d from %s:%d', packetSize, socket.remoteAddress, socket.remotePort);
+        socket.on('data', packetReceiver((packet) => {
+            // A throwing handler used to take the whole process with it, so a
+            // malformed packet only ever costs the connection that sent it.
+            try {
+                return session.dataReceive(packet);
+            } catch (err) {
+                utils.infoWarn(this.name, 'dropped a packet from %s:%d: %s', socket.remoteAddress, socket.remotePort, err.stack || err.message || err);
                 socket.destroy();
             }
-        ));
+        }, (packetSize) => {
+            utils.infoWarn(this.name, 'invalid packet size %d from %s:%d', packetSize, socket.remoteAddress, socket.remotePort);
+            socket.destroy();
+        }));
         socket.on('error', session.error.bind(session));
         socket.on('close', () => session.error());
     }

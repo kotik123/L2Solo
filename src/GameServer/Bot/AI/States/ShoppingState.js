@@ -37,7 +37,7 @@ function findAfkBuyer(bot, town) {
         const offer = MarketOpportunity.findBuyOffers(item.fetchSelfId(), {
             town: town?.name,
             sellerCharacterId: bot.fetchId()
-        }).find((candidate) => candidate.sourceType === 'afk_player_buy_store');
+        }).find((candidate) => ['afk_player_buy_store', 'afk_bot_buy_store'].includes(candidate.sourceType));
         if (!offer) return;
         const qty = Math.min(Number(item.fetchAmount?.() || 0), Number(offer.count || 0));
         if (qty <= 0) return;
@@ -165,6 +165,12 @@ function alternateTownNpcErrand(session, bot, town) {
     const selfId = errand.kind === 'restock_shots'
         ? Number(ShotStock.planForActor(bot)?.selfId || 0)
         : 0;
+    if (selfId) {
+        if (session.shoppingTarget?.actorId) failedSourceIds.add(Number(
+            session.shoppingTarget.sourceId || session.shoppingTarget.actorId));
+        const target = ShotStock.restockTarget(bot, town.name, [...failedSourceIds]);
+        return target ? { ...errand, failedSourceIds: [...failedSourceIds], target } : null;
+    }
     const target = townMerchantTarget(town, bot, selfId, {
         excludedNpcSelfIds: [...failedSourceIds]
     });

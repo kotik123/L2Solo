@@ -39,6 +39,7 @@ const clanPlan = {
 
 async function main() {
     const originalPlanFor = GearAcquisitionPlanner.planFor;
+    const originalMarketPlanForTarget = GearAcquisitionPlanner.marketPlanForTarget;
     const originalBestSourceForPlan = GearAcquisitionPlanner.bestSourceForPlan;
     const originalRetargetPlanSource = GearAcquisitionPlanner.retargetPlanSource;
     const originalStatesForParties = LifeState.statesForParties;
@@ -227,20 +228,37 @@ async function main() {
         const marketClanPlan = {
             ...clanPlan,
             strategy: 'market',
+            market: { town: 'Giran', price: 50000, sourceType: 'afk_bot_store' },
             next: { kind: 'market', town: 'Giran', itemId: clanPlan.target.selfId }
+        };
+        GearAcquisitionPlanner.marketPlanForTarget = (_state, targetId, options) => {
+            assert.strictEqual(targetId, clanPlan.target.selfId);
+            assert(options.maxMarketPrice >= 50000, 'the funded listing must fit the member budget');
+            return { market: marketClanPlan.market, expectedKills: 36 };
         };
         const preservedMarketGoal = ClanEquipmentService.planForMember({
             characterId: 1001,
             name: 'ClanMember',
             level: 35,
+            adena: 100000,
             phase: 'cold',
             inventory: {},
             stats: { equipmentPlan: marketClanPlan }
         }, [], [], { occupancy: { 'clan-spot': { reservedCount: 20, capacity: 2 } }, capacityUnits: 9 });
-        assert.strictEqual(preservedMarketGoal, marketClanPlan,
+        assert.deepStrictEqual(preservedMarketGoal.market, marketClanPlan.market,
             'market clan goals must not be rotated because farming spots are full');
         assert.strictEqual(plannerCalls, 0,
             'market clan goals must remain outside farm capacity planning');
+        GearAcquisitionPlanner.marketPlanForTarget = () => null;
+        const unavailableMarketGoal = ClanEquipmentService.planForMember({
+            characterId: 1001, name: 'ClanMember', level: 35, adena: 100000,
+            phase: 'cold', inventory: {}, stats: { equipmentPlan: marketClanPlan }
+        });
+        assert.strictEqual(unavailableMarketGoal.target.selfId, 9202,
+            'a vanished market offer must release the clan target');
+        assert.strictEqual(plannerCalls, 1);
+        plannerCalls = 0;
+        GearAcquisitionPlanner.marketPlanForTarget = originalMarketPlanForTarget;
 
         const refreshed = await PopulationService.refreshBackgroundPartyRequirements([{
             partyId: 'bgp-clan-lock',
@@ -507,6 +525,7 @@ async function main() {
         console.log('Clan equipment plan lock checks passed');
     } finally {
         GearAcquisitionPlanner.planFor = originalPlanFor;
+        GearAcquisitionPlanner.marketPlanForTarget = originalMarketPlanForTarget;
         GearAcquisitionPlanner.bestSourceForPlan = originalBestSourceForPlan;
         GearAcquisitionPlanner.retargetPlanSource = originalRetargetPlanSource;
         LifeState.statesForParties = originalStatesForParties;

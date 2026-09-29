@@ -374,7 +374,7 @@ function activeBuyDemandSelfIds(timestamp = Date.now()) {
 
 function reserveBuy(offer, qty = 1) {
     const count = Math.max(1, Math.floor(Number(qty) || 1));
-    if (offer?.sourceType === 'afk_player_buy_store') return Number(offer.count) >= count;
+    if (['afk_player_buy_store', 'afk_bot_buy_store'].includes(offer?.sourceType)) return Number(offer.count) >= count;
     if (!['private_buy_store', 'cold_buy_store'].includes(offer?.sourceType) || !offer.storeItem) return false;
     if (Number(offer.storeItem.count) < count || Number(offer.storeItem.price) !== Number(offer.price)) return false;
     const buyerStoreItem = (offer.buyerState?.stats?.marketStore?.items || [])
@@ -395,7 +395,7 @@ function reserveBuy(offer, qty = 1) {
 }
 
 function releaseBuy(offer, qty = 1) {
-    if (offer?.sourceType === 'afk_player_buy_store') return;
+    if (['afk_player_buy_store', 'afk_bot_buy_store'].includes(offer?.sourceType)) return;
     if (!['private_buy_store', 'cold_buy_store'].includes(offer?.sourceType) || !offer.storeItem) return;
     const count = Math.min(
         Math.max(1, Math.floor(Number(qty) || 1)),
@@ -414,7 +414,7 @@ function releaseBuy(offer, qty = 1) {
 }
 
 function commitBuy(offer, qty = 1, buyerState = offer?.buyerState) {
-    if (offer?.sourceType === 'afk_player_buy_store') return;
+    if (['afk_player_buy_store', 'afk_bot_buy_store'].includes(offer?.sourceType)) return;
     const count = Math.min(
         Math.max(1, Math.floor(Number(qty) || 1)),
         Math.max(0, Number(offer?.reservedBuyCount || 0))
@@ -495,7 +495,7 @@ function reserve(offer, qty = 1) {
     const count = Math.max(1, Number(qty) || 1);
     if (!offer?.available || Number(offer.price) <= 0) return false;
     if (offer.sourceType === 'npc') return true;
-    if (offer.sourceType === 'afk_player_store') return Number(offer.count) >= count;
+    if (['afk_player_store', 'afk_bot_store'].includes(offer.sourceType)) return Number(offer.count) >= count;
     if (!['private_store', 'cold_store'].includes(offer.sourceType) || !offer.storeItem) return false;
     if (Number(offer.storeItem.count) < count || Number(offer.storeItem.price) !== Number(offer.price)) return false;
     offer.storeItem.count -= count;
@@ -504,7 +504,7 @@ function reserve(offer, qty = 1) {
 }
 
 function release(offer, qty = 1) {
-    if (offer?.sourceType === 'afk_player_store') return;
+    if (['afk_player_store', 'afk_bot_store'].includes(offer?.sourceType)) return;
     if (!['private_store', 'cold_store'].includes(offer?.sourceType) || !offer.storeItem) return;
     offer.storeItem.count += Math.max(1, Number(qty) || 1);
     offer.count = offer.storeItem.count;

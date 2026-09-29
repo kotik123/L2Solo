@@ -1,0 +1,458 @@
+[
+    {
+        "selfId": 8046,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Marsden",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8047,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Kelly",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8048,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "McDermott",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8049,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Pepper",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8050,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Thora",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8051,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Keach",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8052,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Heid",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    },
+    {
+        "selfId": 8053,
+        "template": {
+            "kind": "SymbolMaker",
+            "name": "Kidder",
+            "title": "Symbol Maker",
+            "level": 70,
+            "hostile": false
+        },
+        "base": {
+            "str": 40,
+            "con": 43,
+            "dex": 30,
+            "int": 21,
+            "wit": 20,
+            "men": 10
+        },
+        "stats": {
+            "pAtk": 1314,
+            "pAtkRnd": 30,
+            "pDef": 470,
+            "mAtk": 780,
+            "mDef": 382,
+            "atkSpd": 278,
+            "castSpd": 253,
+            "atkRadius": 40,
+            "accur": 4.75
+        },
+        "speed": {
+            "walk": 55,
+            "run": 132
+        },
+        "vitals": {
+            "maxHp": 3862,
+            "maxMp": 1493,
+            "revHp": 11.85,
+            "revMp": 2.78,
+            "corpseTime": 7000
+        },
+        "collision": {
+            "radius": 8,
+            "size": 23.5
+        },
+        "equipment": {
+            "weapon": 0,
+            "shield": 0,
+            "reuseTime": 0
+        },
+        "clan": {
+            "clanName": "",
+            "helpRadius": 0
+        },
+        "rewards": {
+            "exp": 0,
+            "sp": 0
+        }
+    }
+]

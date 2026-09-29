@@ -161,6 +161,30 @@ class NpcModel extends CreatureModel {
         return ['Monster', 'Boss'].includes(this.model.kind);
     }
 
+    // The C4 sources never run a damage pipeline for ordinary L2NpcInstance /
+    // L2FolkInstance NPCs: only L2Attackable templates carry reduceHp/die
+    // semantics, so town staff are immortal by construction. This project
+    // routes every spawned NPC through Npc/Generics/ReceivedHit so town
+    // guards can fight back, which leaves shopkeepers, warehouse keepers, and
+    // other town staff killable unless the source rule is restated here.
+    // Monsters, Bosses, summons/pets, and the town guards that engage them
+    // stay killable.
+    fetchIsKillable() {
+        // NPC models without a template kind are lightweight/test doubles;
+        // only real templates are subject to the immortality rule.
+        const kind = String(this.model.kind || '');
+        if (!kind) return true;
+        if (['Monster', 'Boss', 'Summon'].includes(kind)) return true;
+        if (this.fetchAttackable() || this.fetchIsSummon() || this.fetchIsPet()) return true;
+        return invoke('GameServer/Npc/TownGuard').isTownGuard(this);
+    }
+
+    // Immortal town staff keep taking hits, but their HP floor stops at 1 so
+    // the death pipeline can never run for them.
+    fetchImmortalMinHp() {
+        return this.fetchIsKillable() ? 0 : 1;
+    }
+
     fetchAcquiredExp() {
         return Formulas.calcAcquiredExp(this.fetchLevel(), this.fetchRewardExp());
     }

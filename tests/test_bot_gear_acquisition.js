@@ -42,6 +42,23 @@ assert.strictEqual(raidSource?.sourceKind, 'raid',
 assert.strictEqual(raidSource?.spotId, 'raid:10372');
 assert.strictEqual(GearAcquisitionPlanner.partyNeedForSource({ level: 20 }, raidSource), 'required',
     'raid equipment sources must always require a prepared clan roster');
+const marketRefreshState = { level: 20, adena: 100000,
+    stats: { classId: 0, role: 'dps' }, inventory: {} };
+const retainedSaberRoute = { status: 'active', grade: 'd', strategy: 'direct_drop',
+    target: { selfId: 123, name: 'Saber', slot: 7 },
+    next: { npcId: 10372, spotId: 'raid:10372', itemId: 123,
+        sourceKind: 'raid', raidBoss: true, raidBossTemplateId: 10372 } };
+assert(GearAcquisitionPlanner.bestSourceForPlan(marketRefreshState, retainedSaberRoute,
+    [raidSourceProfile], { allowRaidSources: true }), 'the old farming route must still be available');
+const newAfkOffer = (item) => Number(item.selfId) === 123
+    ? { selfId: 123, price: 1000, town: 'Gludio', sourceType: 'afk_bot_store' } : null;
+assert.strictEqual(GearAcquisitionPlanner.replacementPlanFor(marketRefreshState,
+    retainedSaberRoute, [raidSourceProfile], {
+        allowRaidSources: true, findMarketOffer: newAfkOffer
+    }).strategy, 'market', 'a funded AFK offer must refresh a retained equipment farming plan');
+assert.strictEqual(GearAcquisitionPlanner.fundedMarketPlanForTarget({ ...marketRefreshState, adena: 500 },
+    123, { findMarketOffer: newAfkOffer }), null,
+    'an unfunded listing must not interrupt the active farming route');
 assert.strictEqual(
     GearAcquisitionPlanner.sourceEffort(raidSource, { level: 20 }),
     (1 / raidSource.expectedYield) * 7,
@@ -1026,6 +1043,15 @@ assert.strictEqual(materialGoal.target.itemId, 1869, 'a stalled material route m
 const materialPlan = GearAcquisitionPlanner.planFor(mage, { spots: [stoneGolemSpot] });
 if (materialPlan.strategy === 'craft' && materialPlan.next) {
     assert(Number.isFinite(materialPlan.next.itemId), 'a craft route must persist the next farmable material for market fallback');
+    assert(materialPlan.materials.some((material) => Number(material.farmEffort) > 0),
+        'craft planning must persist the farm cost needed to compare market components');
+    const legacyPlan = { ...materialPlan,
+        materials: materialPlan.materials.map(({ farmEffort, ...material }) => material) };
+    const costedPlan = GearAcquisitionPlanner.withMaterialFarmEffort(legacyPlan, mage, [stoneGolemSpot]);
+    assert(costedPlan.materials.some((material) => Number(material.farmEffort) > 0),
+        'a retained craft plan must gain comparable farm costs without changing its target');
+    assert.strictEqual(GearAcquisitionPlanner.withMaterialFarmEffort(costedPlan, mage, [stoneGolemSpot]), costedPlan,
+        'the migration should be calculated only once');
 }
 
 assert.strictEqual(GearAcquisitionPlanner.shouldFinishPreviousPlan(

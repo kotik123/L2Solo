@@ -568,7 +568,7 @@ function compactClanGoal(raw) {
 
 function clanOverviewQuery() {
     return Database.execute([`
-        WITH member_projection AS (
+        WITH member_projection AS MATERIALIZED (
             SELECT c.id, c.clanId, c.level, c.isOnline,
                    CASE WHEN ${CLAN_BOT_MEMBER_SQL} THEN 1 ELSE 0 END AS isBot,
                    CASE WHEN c.isOnline = 1 OR life.phase = 'hot' THEN 1 ELSE 0 END AS isOnlineNow,
@@ -2042,7 +2042,7 @@ async function marketSnapshot() {
     const market = await MarketSnapshot.detail();
     const knowledge = knowledgeBaseService();
     const itemById = new Map(market.items.map((row) => {
-        const detail = knowledge.itemDetail(row.selfId);
+        const detail = knowledge.itemOverview(row.selfId);
         const enriched = {
             ...row,
             name: detail?.name || row.name,
@@ -2050,7 +2050,7 @@ async function marketSnapshot() {
             category: detail?.category || null,
             grade: detail?.grade || null,
             iconUrl: detail?.iconUrl || null,
-            referencePrice: Number(detail?.template?.price || 0) || null
+            referencePrice: Number(detail?.price || 0) || null
         };
         return [Number(row.selfId), enriched];
     }));

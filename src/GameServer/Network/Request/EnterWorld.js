@@ -16,6 +16,8 @@ function sendClanWindow(session) {
 function enterWorld(session, buffer) {
     const continueEnter = async () => {
         session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
+        invoke('GameServer/Henna/HennaService').restore(session)
+            .catch((error) => utils.infoWarn('Henna', 'henna login restore failed: %s', error.message));
         const shortcutsReady = Database.fetchMacros(session.actor.fetchId()).then((macros) => {
             const revision = (session.macroRevision || 0) + 1;
             session.macroRevision = revision;

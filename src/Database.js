@@ -2,6 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const Statements = require('./DatabaseStatements');
+const MarketTradeOverview = require('./MarketTradeOverview');
 const CheckpointCoordinator = require('./DatabaseCheckpointCoordinator');
 const { XP_DIVIDER: KARMA_XP_DIVIDER } = require('./GameServer/Karma');
 const InteractionMemoryPolicy = require('./GameServer/Social/InteractionMemoryPolicy');
@@ -1173,6 +1174,19 @@ function applySchemaMigrations() {
         if (!columns.includes('newbie')) connection.exec('ALTER TABLE characters ADD COLUMN newbie INTEGER NOT NULL DEFAULT -1');
         if (!columns.includes('newbieShotsReceived')) connection.exec('ALTER TABLE characters ADD COLUMN newbieShotsReceived INTEGER NOT NULL DEFAULT 0');
     }]);
+    migrations.push([48, () => connection.exec(`CREATE TABLE IF NOT EXISTS character_hennas (
+        characterId INTEGER NOT NULL REFERENCES characters(id) ON DELETE CASCADE,
+        slot INTEGER NOT NULL,
+        symbolId INTEGER NOT NULL,
+        PRIMARY KEY(characterId, slot)
+    )`)]);
+    migrations.push([49, () => connection.exec(`
+        CREATE INDEX IF NOT EXISTS clan_warehouse_ledger_revision
+            ON clan_warehouse_ledger(clanId, warehouseRevision);
+        CREATE INDEX IF NOT EXISTS clan_goal_events_meaningful_recent
+            ON clan_goal_events(clanId, occurredAt DESC, id DESC)
+            WHERE eventType != 'action_succeeded';
+    `)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;
@@ -1239,32 +1253,8 @@ function jsonArray(raw) {
     }
 }
 
-function marketTradeRow(row = {}) {
-    return {
-        id: Number(row.id || 0),
-        eventKey: String(row.eventKey || ''),
-        at: Number(row.occurredAt || 0),
-        channel: String(row.channel || ''),
-        sourceType: String(row.sourceType || ''),
-        selfId: Number(row.selfId || 0),
-        itemName: String(row.itemName || ''),
-        quantity: Number(row.quantity || 0),
-        unitPrice: Number(row.unitPrice || 0),
-        adena: Number(row.totalPrice || 0),
-        town: row.town || null,
-        seller: {
-            characterId: Number(row.sellerCharacterId || 0) || null,
-            name: row.sellerName || null
-        },
-        buyer: {
-            characterId: Number(row.buyerCharacterId || 0) || null,
-            name: row.buyerName || null
-        }
-    };
-}
-
 function marketTradeAggregate(since, { selfId = null, to = null } = {}) {
-    const where = ['occurredAt >= ?'];
+    const where = ['occurredAt >= ?', MarketTradeOverview.CANONICAL_FILTER];
     const params = [Number(since)];
     if (Number(selfId) > 0) {
         where.push('selfId = ?');
@@ -1497,6 +1487,29 @@ function syncPlayerManagedClanUnsafe(clanId) {
         mode: 'player_managed',
         memberIds: botMemberIds
     };
+}
+
+// Economic operations must commit their cold projection with the physical
+// inventory. A later failure or restart must not replay pre-purchase balances.
+function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
+    if (!state) return null;
+    const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
+    if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+        || (state.simulation && Number(row.simulationRevision) !== Number(state.simulation.revision))) {
+        throw new Error('economy_state_changed');
+    }
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const physical = LifeState.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ?', [Number(characterId)]));
+    const inventory = jsonObject(row.inventorySummary);
+    for (const id of new Set([57, ...changedIds].map(Number))) {
+        if (physical[id]) inventory[id] = physical[id];
+        else delete inventory[id];
+    }
+    const adena = Number(physical[57]?.amount || 0);
+    write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
+        simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+    [JSON.stringify(inventory), adena, mp, now(), Number(characterId)]);
+    return normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]));
 }
 
 function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
@@ -2109,10 +2122,23 @@ function returnAfkTradeEscrowUnsafe(shop, closedAt = now()) {
         WHERE id = ? AND status = 'active'`, [closedAt, closedAt, shop.id]);
 }
 
-function completeAfkTradeIfFilledUnsafe(shopId, timestamp) {
-    const remaining = Number(one(`SELECT COUNT(*) AS count FROM afk_trade_lines
+function completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned = false) {
+    const lines = botOwned ? all(`SELECT selfId, name, count FROM afk_trade_lines
+        WHERE shopId = ? AND count > 0 ORDER BY id`, [shopId]) : null;
+    const remaining = lines ? lines.length : Number(one(`SELECT COUNT(*) AS count FROM afk_trade_lines
         WHERE shopId = ? AND count > 0`, [shopId])?.count || 0);
-    if (remaining > 0) return false;
+    if (remaining > 0) {
+        if (lines) {
+            const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
+            const sellTitle = marketStoreTitle(lines), buyTitle = marketBuyStoreTitle(lines);
+            // Same trade transaction and existing revision: only this shop's few
+            // remaining lines are inspected, with no population/market scan.
+            write(`UPDATE afk_trade_shops SET title = CASE WHEN storeType = 3 THEN ? ELSE ? END
+                WHERE id = ? AND title != CASE WHEN storeType = 3 THEN ? ELSE ? END`,
+            [buyTitle, sellTitle, shopId, buyTitle, sellTitle]);
+        }
+        return false;
+    }
     write(`UPDATE afk_trade_shops
         SET status = 'filled', escrowAdena = 0, revision = revision + 1, updatedAt = ?, closedAt = ?
         WHERE id = ? AND status = 'active'`, [timestamp, timestamp, shopId]);
@@ -2254,6 +2280,111 @@ const Database = {
         return run(statement[0], statement[1] || [], operation, statement[2]?.read ?? null, statement[2]?.onTiming);
     },
 
+    transferBuffServiceAdena({ payerId, providerId, amount, expectedSpotId = null } = {}) {
+        const payer = Number(payerId), provider = Number(providerId), price = Number(amount);
+        if (!Number.isSafeInteger(payer) || payer <= 0 || !Number.isSafeInteger(provider) || provider <= 0
+            || payer === provider || !Number.isSafeInteger(price) || price <= 0) {
+            return Promise.resolve({ ok: false, reason: 'invalid_payment' });
+        }
+        return withCharacterFlush(payer, () => withCharacterFlush(provider, () => inTransaction(() => {
+            const payerCharacter = one('SELECT id FROM characters WHERE id = ?', [payer]);
+            const providerCharacter = one('SELECT id FROM characters WHERE id = ?', [provider]);
+            if (!payerCharacter || !providerCharacter) return { ok: false, reason: 'missing_character' };
+            const payerState = one('SELECT phase, activity, partyId, spotId FROM bot_life_state WHERE characterId = ?', [payer]);
+            const providerState = one('SELECT phase, activity, partyId, spotId FROM bot_life_state WHERE characterId = ?', [provider]);
+            if (expectedSpotId !== null) {
+                if (!payerState || !providerState || payerState.phase !== 'cold' || providerState.phase !== 'cold'
+                    || payerState.spotId !== expectedSpotId || providerState.spotId !== expectedSpotId
+                    || payerState.partyId || providerState.partyId
+                    || !['hunting', 'resting'].includes(payerState.activity)
+                    || !['hunting', 'resting'].includes(providerState.activity)) {
+                    return { ok: false, reason: 'spot_or_activity_changed' };
+                }
+            }
+            const balance = afkTradeAdenaRowsUnsafe(payer)
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (balance < price) return { ok: false, reason: 'not_enough_adena' };
+            afkTradeDebitAdenaUnsafe(payer, price);
+            const providerAdenaId = afkTradeCreditAdenaUnsafe(provider, price);
+            const payerRows = afkTradeAdenaRowsUnsafe(payer);
+            const payerBalance = payerRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            const providerBalance = afkTradeAdenaRowsUnsafe(provider)
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (payerState) syncAdenaSnapshotUnsafe(payer, payerBalance);
+            if (providerState) syncAdenaSnapshotUnsafe(provider, providerBalance);
+            return { ok: true, payerBalance, providerBalance,
+                payerAdenaId: Number(payerRows[0]?.id || 0), providerAdenaId };
+        }, 'buff-service:payment')));
+    },
+
+    purchaseColdBuffs({ payerId, providerId, spotId, payerRevision, providerRevision,
+        price, mpCost, effects, timestamp = now() } = {}) {
+        const payer = Number(payerId), provider = Number(providerId);
+        const fee = Number(price), mana = Number(mpCost);
+        if (!Number.isSafeInteger(payer) || payer <= 0 || !Number.isSafeInteger(provider) || provider <= 0
+            || payer === provider || !spotId || !Number.isSafeInteger(fee) || fee < 0
+            || !Number.isSafeInteger(mana) || mana < 0 || !Array.isArray(effects)
+            || effects.length < 1 || effects.length > 20) return Promise.resolve({ ok: false, reason: 'invalid_request' });
+        return withCharacterFlush(payer, () => withCharacterFlush(provider, () => inTransaction(() => {
+            const rows = [payer, provider].map(id => one('SELECT * FROM bot_life_state WHERE characterId = ?', [id]));
+            const [buyer, seller] = rows;
+            if (!buyer || !seller || [buyer, seller].some(row => row.phase !== 'cold'
+                || row.spotId !== spotId || row.partyId || !['hunting', 'resting'].includes(row.activity))) {
+                return { ok: false, reason: 'spot_or_activity_changed' };
+            }
+            if (Number(buyer.simulationRevision) !== Number(payerRevision)
+                || Number(seller.simulationRevision) !== Number(providerRevision)) return { ok: false, reason: 'stale_snapshot' };
+            if (Number(seller.mp || 0) < mana) return { ok: false, reason: 'not_enough_mp' };
+            const buyerStats = parsedObject(buyer.statsJson), sellerStats = parsedObject(seller.statsJson);
+            if (!buyerStats || !sellerStats) return { ok: false, reason: 'invalid_stats' };
+            const sellerSkills = sellerStats.coldCombat?.skills?.length
+                ? sellerStats.coldCombat.skills
+                : invoke('GameServer/Bot/Population/ColdCombatProfile').skillRecordsFromTree(
+                    Number(sellerStats.classId || sellerStats.classProgressionClassId || 0), Number(seller.level || 1));
+            const known = new Map(sellerSkills.map(skill => [Number(skill.selfId), Number(skill.level)]));
+            if (effects.some(effect => !known.has(Number(effect.id)) || known.get(Number(effect.id)) < Number(effect.level))) {
+                return { ok: false, reason: 'skill_changed' };
+            }
+            const currentEffects = (buyerStats.coldCombat?.effects || []).filter(effect => Number(effect.expiresAt || 0) > timestamp);
+            if (effects.some(next => currentEffects.some(effect =>
+                String(effect.stackFamily || effect.key) === String(next.stackFamily || next.key)
+                    && Number(effect.level || 0) >= Number(next.level || 0)
+                    && Number(effect.expiresAt || 0) - timestamp > 120000))) {
+                return { ok: false, reason: 'already_buffed' };
+            }
+            const payerBalance = afkTradeAdenaRowsUnsafe(payer).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (payerBalance < fee) return { ok: false, reason: 'not_enough_adena' };
+            if (fee > 0) {
+                afkTradeDebitAdenaUnsafe(payer, fee);
+                afkTradeCreditAdenaUnsafe(provider, fee);
+            }
+            const nextEffects = currentEffects.filter(effect => !effects.some(next =>
+                String(effect.stackFamily || effect.key) === String(next.stackFamily || next.key)));
+            nextEffects.push(...effects);
+            buyerStats.coldCombat = { ...(buyerStats.coldCombat || {}), effects: nextEffects };
+            buyerStats.lastBuffServicePurchase = { providerId: provider, price: fee, count: effects.length, at: timestamp };
+            sellerStats.lastBuffService = { buyerId: payer, price: fee, count: effects.length, at: timestamp };
+            const nextMp = Math.max(0, Number(seller.mp) - mana);
+            const buyerAdena = payerBalance - fee;
+            const sellerAdena = afkTradeAdenaRowsUnsafe(provider).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            const buyerInventory = parsedObject(buyer.inventorySummary) || {};
+            const sellerInventory = parsedObject(seller.inventorySummary) || {};
+            buyerInventory['57'] = { ...(buyerInventory['57'] || {}), selfId: 57, name: 'Adena', amount: buyerAdena };
+            sellerInventory['57'] = { ...(sellerInventory['57'] || {}), selfId: 57, name: 'Adena', amount: sellerAdena };
+            write(`UPDATE bot_life_state SET statsJson = ?, inventorySummary = ?, adena = ?,
+                simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+            [JSON.stringify(buyerStats), JSON.stringify(buyerInventory), buyerAdena, timestamp, payer]);
+            write(`UPDATE bot_life_state SET statsJson = ?, inventorySummary = ?, adena = ?, mp = ?,
+                simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+            [JSON.stringify(sellerStats), JSON.stringify(sellerInventory), sellerAdena, nextMp, timestamp, provider]);
+            write('UPDATE characters SET mp = ? WHERE id = ?', [nextMp, provider]);
+            return { ok: true, buyerAdena, sellerAdena, nextMp,
+                buyerRevision: Number(buyer.simulationRevision) + 1,
+                sellerRevision: Number(seller.simulationRevision) + 1,
+                buyerStats, sellerStats, buyerInventory, sellerInventory };
+        }, 'buff-service:cold')));
+    },
+
     recordMarketTrade(trade = {}) {
         const eventKey = String(trade.eventKey || '').slice(0, 180);
         const occurredAt = Math.max(1, Math.floor(Number(trade.at || trade.occurredAt || now())));
@@ -2320,47 +2451,20 @@ const Database = {
     },
 
     fetchMarketTradeOverview({ timestamp = now(), recentLimit = 200 } = {}) {
-        const current = Math.max(1, Number(timestamp) || now());
-        const limit = Math.max(1, Math.min(500, Math.floor(Number(recentLimit) || 200)));
-        const dayAgo = current - 24 * 60 * 60 * 1000;
-        const weekAgo = current - 7 * 24 * 60 * 60 * 1000;
-        return enqueue(() => {
-            const recent = all(`SELECT * FROM market_trades
-                ORDER BY occurredAt DESC, id DESC LIMIT ${limit}`).map(marketTradeRow);
-            const byItem = all(`SELECT selfId, MAX(itemName) AS name, COUNT(*) AS trades,
-                COALESCE(SUM(quantity), 0) AS items, COALESCE(SUM(totalPrice), 0) AS adena,
-                MAX(occurredAt) AS lastTradeAt
-                FROM market_trades WHERE occurredAt >= ?
-                GROUP BY selfId ORDER BY adena DESC, items DESC, selfId ASC`, [weekAgo])
-                .map((row) => ({
-                    selfId: Number(row.selfId),
-                    name: row.name || `Item ${row.selfId}`,
-                    trades: Number(row.trades || 0),
-                    items: Number(row.items || 0),
-                    adena: Number(row.adena || 0),
-                    lastTradeAt: Number(row.lastTradeAt || 0) || null
-                }));
-            const byTown = Object.fromEntries(all(`SELECT COALESCE(town, 'Unknown') AS town,
-                COUNT(*) AS trades, COALESCE(SUM(quantity), 0) AS items,
-                COALESCE(SUM(totalPrice), 0) AS adena
-                FROM market_trades WHERE occurredAt >= ?
-                GROUP BY COALESCE(town, 'Unknown') ORDER BY adena DESC`, [weekAgo]).map((row) => [row.town, {
-                trades: Number(row.trades || 0),
-                items: Number(row.items || 0),
-                adena: Number(row.adena || 0)
-            }]));
-            return {
-                scope: 'persistent_90d',
-                retentionDays: 90,
-                windows: {
-                    day: marketTradeAggregate(dayAgo),
-                    week: marketTradeAggregate(weekAgo)
-                },
-                recent,
-                byItem,
-                byTown
-            };
-        }, { operation: 'market:trade-overview', read: true });
+        return enqueue(() => MarketTradeOverview.fetch(all, { timestamp, recentLimit }),
+            { operation: 'market:trade-overview', read: true });
+    },
+
+    fetchMarketBuyerActivity({ timestamp = now(), rangeMs = 24 * 60 * 60 * 1000 } = {}) {
+        const since = Number(timestamp) - Math.max(1, Math.min(MARKET_TRADE_RETENTION_MS, Number(rangeMs) || 86400000));
+        // A matched AFK trade can write both seller and buyer journal rows.
+        // Distinct buyers count that transaction once and bound repeat purchases
+        // of the same equipment by one bot during the review window.
+        return enqueue(() => all(`SELECT selfId, COUNT(DISTINCT buyerCharacterId) AS buyers
+            FROM market_trades
+            WHERE occurredAt >= ? AND buyerCharacterId > 0
+                AND sourceType NOT IN ('npc', 'static_buy_store', 'static_sell_store')
+            GROUP BY selfId`, [since]), { operation: 'market:buyer-activity', read: true });
     },
 
     fetchMarketTradeHistory(selfId, { timestamp = now(), rangeMs = 24 * 60 * 60 * 1000, bucketMs = 60 * 60 * 1000 } = {}) {
@@ -2375,6 +2479,7 @@ const Database = {
                 unitPrice, COUNT(*) AS trades, SUM(quantity) AS units, SUM(totalPrice) AS adena
                 FROM market_trades
                 WHERE selfId = ? AND occurredAt >= ? AND occurredAt <= ?
+                    AND ${MarketTradeOverview.CANONICAL_FILTER}
                 GROUP BY bucketAt, unitPrice ORDER BY bucketAt ASC, unitPrice ASC`,
             [bucket, bucket, itemId, since, current]);
             const grouped = new Map();
@@ -2409,11 +2514,13 @@ const Database = {
             const summary = marketTradeAggregate(since, { selfId: itemId, to: current });
             const priceSummary = one(`SELECT MIN(unitPrice) AS low, MAX(unitPrice) AS high,
                 CASE WHEN SUM(quantity) > 0 THEN CAST(SUM(totalPrice) AS REAL) / SUM(quantity) END AS vwap
-                FROM market_trades WHERE selfId = ? AND occurredAt >= ? AND occurredAt <= ?`,
+                FROM market_trades WHERE selfId = ? AND occurredAt >= ? AND occurredAt <= ?
+                    AND ${MarketTradeOverview.CANONICAL_FILTER}`,
             [itemId, since, current]) || {};
             const channels = Object.fromEntries(all(`SELECT channel, COUNT(*) AS trades,
                 SUM(quantity) AS units, SUM(totalPrice) AS adena
                 FROM market_trades WHERE selfId = ? AND occurredAt >= ? AND occurredAt <= ?
+                    AND ${MarketTradeOverview.CANONICAL_FILTER}
                 GROUP BY channel ORDER BY adena DESC`, [itemId, since, current]).map((row) => [row.channel, {
                 trades: Number(row.trades || 0), units: Number(row.units || 0), adena: Number(row.adena || 0)
             }]));
@@ -2449,8 +2556,11 @@ const Database = {
             const expandTrade = one('SELECT level FROM skills WHERE characterId = ? AND selfId = 1370', [characterId]);
             const limit = require('./GameServer/PrivateStoreLimits').tradeLimit(owner.race, expandTrade?.level || 0, storeType);
             if (rows.length > limit) throw new Error(`AFK trade allows at most ${limit} item slots`);
-            const active = one("SELECT id FROM afk_trade_shops WHERE ownerId = ? AND status = 'active'", [characterId]);
-            if (active) throw new Error('afk_trade_already_active');
+            const active = one("SELECT * FROM afk_trade_shops WHERE ownerId = ? AND status = 'active'", [characterId]);
+            if (active && !config.replace) throw new Error('afk_trade_already_active');
+            // Replacing a remote shop returns its escrow and reserves the new
+            // stock in the same transaction. A failed publish restores both.
+            if (active) returnAfkTradeEscrowUnsafe(active);
 
             const timestamp = now();
             let escrowAdena = 0;
@@ -2498,7 +2608,18 @@ const Database = {
 
                 let source = null;
                 if (storeType === 1) {
-                    const sourceId = Number(line.objectId || line.sourceObjectId || 0);
+                    let sourceId = Number(line.objectId || line.sourceObjectId || 0);
+                    if (active && config.replace) {
+                        const preferred = one(`SELECT id FROM items WHERE id = ? AND characterId = ?
+                            AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?`,
+                        [sourceId, characterId, selfId, enchant, count]);
+                        if (!preferred || sourceIds.has(sourceId)) {
+                            const candidates = all(`SELECT id FROM items WHERE characterId = ?
+                                AND selfId = ? AND enchant = ? AND equipped = 0 AND amount >= ?
+                                ORDER BY id`, [characterId, selfId, enchant, count]);
+                            sourceId = Number(candidates.find((candidate) => !sourceIds.has(Number(candidate.id)))?.id || 0);
+                        }
+                    }
                     if (!sourceId || sourceIds.has(sourceId)) throw new Error('invalid_afk_trade_source');
                     sourceIds.add(sourceId);
                     source = afkTradeTakeItemUnsafe(characterId, sourceId, selfId, enchant, count);
@@ -2546,6 +2667,133 @@ const Database = {
         }, 'afk-trade:close'));
     },
 
+    repriceAfkTradeShop(ownerId, lineId, price, expectedRevision = null, quantity = null) {
+        const characterId = Number(ownerId);
+        const id = Number(lineId);
+        const unitPrice = Math.floor(Number(price));
+        if (!characterId || !id || !Number.isSafeInteger(unitPrice) || unitPrice < 1) {
+            return Promise.reject(new Error('invalid_afk_trade_price'));
+        }
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const shop = one("SELECT * FROM afk_trade_shops WHERE ownerId = ? AND status = 'active'", [characterId]);
+            if (!shop) throw new Error('afk_trade_shop_unavailable');
+            if (expectedRevision !== null && Number(shop.revision) !== Number(expectedRevision)) {
+                throw new Error('afk_trade_shop_changed');
+            }
+            const line = one('SELECT * FROM afk_trade_lines WHERE id = ? AND shopId = ? AND count > 0', [id, shop.id]);
+            if (!line) throw new Error('afk_trade_line_unavailable');
+            const count = quantity === null ? Number(line.count) : Math.floor(Number(quantity));
+            if (!Number.isSafeInteger(count) || count < 1 || count > Number(line.count)) {
+                throw new Error('invalid_afk_trade_quantity');
+            }
+            const returned = Number(line.count) - count;
+            if (returned > 0 && Number(shop.storeType) === 1) {
+                afkTradeCreditItemUnsafe(characterId, line, returned);
+            }
+            const difference = Number(shop.storeType) === 3
+                ? unitPrice * count - Number(line.price) * Number(line.count) : 0;
+            const reserved = Number(shop.escrowAdena || 0) + difference;
+            if (!Number.isSafeInteger(reserved) || reserved < 0) throw new Error('invalid_afk_trade_budget');
+            if (difference > 0) afkTradeDebitAdenaUnsafe(characterId, difference);
+            if (difference < 0) afkTradeCreditAdenaUnsafe(characterId, -difference);
+            const timestamp = now();
+            write('UPDATE afk_trade_lines SET price = ?, count = ?, updatedAt = ? WHERE id = ?',
+                [unitPrice, count, timestamp, id]);
+            write(`UPDATE afk_trade_shops SET escrowAdena = ?, revision = revision + 1,
+                updatedAt = ? WHERE id = ?`, [reserved, timestamp, shop.id]);
+            const owner = one('SELECT username FROM characters WHERE id = ?', [characterId]);
+            completeAfkTradeIfFilledUnsafe(shop.id, timestamp, String(owner?.username || '').startsWith('bot_'));
+            return {
+                shop: afkTradeShopUnsafe(shop.id),
+                ownerInventory: afkTradeInventoryUnsafe(characterId)
+            };
+        }, 'afk-trade:reprice'));
+    },
+
+    matchAfkTradeShops(details = {}) {
+        const sellShopId = Number(details.sellShopId);
+        const buyShopId = Number(details.buyShopId);
+        const sellLineId = Number(details.sellLineId);
+        const buyLineId = Number(details.buyLineId);
+        const quantity = Math.floor(Number(details.amount));
+        const sellerId = Number(details.sellerId);
+        const buyerId = Number(details.buyerId);
+        if (!sellShopId || !buyShopId || !sellLineId || !buyLineId || !sellerId || !buyerId
+            || sellerId === buyerId || !Number.isSafeInteger(quantity) || quantity < 1) {
+            return Promise.reject(new Error('invalid_afk_trade_match'));
+        }
+        return withCharacterFlushes([sellerId, buyerId], () => inTransaction(() => {
+            const sellerShop = one("SELECT * FROM afk_trade_shops WHERE id = ? AND ownerId = ? AND status = 'active' AND storeType = 1",
+                [sellShopId, sellerId]);
+            const buyerShop = one("SELECT * FROM afk_trade_shops WHERE id = ? AND ownerId = ? AND status = 'active' AND storeType = 3",
+                [buyShopId, buyerId]);
+            if (!sellerShop || !buyerShop) throw new Error('afk_trade_shop_changed');
+            const seller = one('SELECT name, username FROM characters WHERE id = ?', [sellerId]);
+            const buyer = one('SELECT name, username FROM characters WHERE id = ?', [buyerId]);
+            const botOwned = String(seller?.username || '').startsWith('bot_');
+            const botBuyer = String(buyer?.username || '').startsWith('bot_');
+            if (sellerShop.town !== buyerShop.town && !botOwned && !botBuyer) throw new Error('afk_trade_shop_changed');
+            if (details.sellRevision != null && Number(sellerShop.revision) !== Number(details.sellRevision)) throw new Error('afk_trade_shop_changed');
+            if (details.buyRevision != null && Number(buyerShop.revision) !== Number(details.buyRevision)) throw new Error('afk_trade_shop_changed');
+            const sellLine = one('SELECT * FROM afk_trade_lines WHERE id = ? AND shopId = ?', [sellLineId, sellShopId]);
+            const buyLine = one('SELECT * FROM afk_trade_lines WHERE id = ? AND shopId = ?', [buyLineId, buyShopId]);
+            if (!sellLine || !buyLine || Number(sellLine.selfId) !== Number(buyLine.selfId)
+                || Number(sellLine.enchant || 0) !== Number(buyLine.enchant || 0)
+                || Number(sellLine.count) < quantity || Number(buyLine.count) < quantity
+                || Number(sellLine.price) > Number(buyLine.price)) throw new Error('afk_trade_offer_changed');
+            const total = Number(sellLine.price) * quantity;
+            if (!Number.isSafeInteger(total) || total < 1 || Number(buyerShop.escrowAdena) < Number(buyLine.price) * quantity) {
+                throw new Error('afk_trade_budget_changed');
+            }
+            afkTradeCreditItemUnsafe(buyerId, sellLine, quantity);
+            afkTradeCreditAdenaUnsafe(sellerId, total);
+            const refund = (Number(buyLine.price) - Number(sellLine.price)) * quantity;
+            if (refund > 0) afkTradeCreditAdenaUnsafe(buyerId, refund);
+            const timestamp = now();
+            write('UPDATE afk_trade_lines SET count = count - ?, updatedAt = ? WHERE id IN (?, ?)',
+                [quantity, timestamp, sellLineId, buyLineId]);
+            write('UPDATE afk_trade_shops SET revision = revision + 1, updatedAt = ? WHERE id = ?',
+                [timestamp, sellShopId]);
+            write(`UPDATE afk_trade_shops SET escrowAdena = escrowAdena - ?,
+                revision = revision + 1, updatedAt = ? WHERE id = ?`,
+            [Number(buyLine.price) * quantity, timestamp, buyShopId]);
+            const sellerEventId = Number(write(`INSERT INTO afk_trade_events(
+                shopId, ownerId, counterpartyId, kind, selfId, itemName, amount,
+                unitPrice, totalPrice, createdAt
+            ) VALUES (?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?)`, [
+                sellShopId, sellerId, buyerId, sellLine.selfId, sellLine.name,
+                quantity, sellLine.price, total, timestamp
+            ]).insertId);
+            const buyerEventId = Number(write(`INSERT INTO afk_trade_events(
+                shopId, ownerId, counterpartyId, kind, selfId, itemName, amount,
+                unitPrice, totalPrice, createdAt
+            ) VALUES (?, ?, ?, 'purchase', ?, ?, ?, ?, ?, ?)`, [
+                buyShopId, buyerId, sellerId, sellLine.selfId, sellLine.name,
+                quantity, sellLine.price, total, timestamp
+            ]).insertId);
+            write(`INSERT OR IGNORE INTO market_trades (
+                eventKey, occurredAt, channel, sourceType, selfId, itemName,
+                quantity, unitPrice, totalPrice, town,
+                sellerCharacterId, sellerName, buyerCharacterId, buyerName
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                `afk:${sellerEventId}`, timestamp, botOwned ? 'bot_wts' : 'player_wts',
+                botOwned ? 'afk_bot_store' : 'afk_player_store', sellLine.selfId, sellLine.name,
+                quantity, sellLine.price, total, sellerShop.town,
+                sellerId, seller?.name || null, buyerId, buyer?.name || null
+            ]);
+            completeAfkTradeIfFilledUnsafe(sellShopId, timestamp, botOwned);
+            completeAfkTradeIfFilledUnsafe(buyShopId, timestamp, botBuyer);
+            return {
+                sellerEventId, buyerEventId, amount: quantity, totalPrice: total,
+                line: sellLine,
+                sellerShop: afkTradeShopUnsafe(sellShopId),
+                buyerShop: afkTradeShopUnsafe(buyShopId),
+                sellerInventory: afkTradeInventoryUnsafe(sellerId),
+                buyerInventory: afkTradeInventoryUnsafe(buyerId)
+            };
+        }, 'afk-trade:match-shops'));
+    },
+
     buyFromAfkTradeShop(counterpartyId, details = {}) {
         const buyerId = Number(counterpartyId);
         const shopId = Number(details.shopId);
@@ -2575,17 +2823,19 @@ const Database = {
             ) VALUES (?, ?, ?, 'sale', ?, ?, ?, ?, ?, ?)`, [
                 shopId, shop.ownerId, buyerId, line.selfId, line.name, quantity, line.price, total, timestamp
             ]).insertId);
-            const owner = one('SELECT name FROM characters WHERE id = ?', [shop.ownerId]);
+            const owner = one('SELECT name, username FROM characters WHERE id = ?', [shop.ownerId]);
             const buyer = one('SELECT name FROM characters WHERE id = ?', [buyerId]);
+            const botOwned = String(owner?.username || '').startsWith('bot_');
             write(`INSERT OR IGNORE INTO market_trades (
                 eventKey, occurredAt, channel, sourceType, selfId, itemName,
                 quantity, unitPrice, totalPrice, town,
                 sellerCharacterId, sellerName, buyerCharacterId, buyerName
-            ) VALUES (?, ?, 'player_wts', 'afk_player_store', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-                `afk:${eventId}`, timestamp, line.selfId, line.name, quantity, line.price, total,
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                `afk:${eventId}`, timestamp, botOwned ? 'bot_wts' : 'player_wts',
+                botOwned ? 'afk_bot_store' : 'afk_player_store', line.selfId, line.name, quantity, line.price, total,
                 shop.town, shop.ownerId, owner?.name || null, buyerId, buyer?.name || null
             ]);
-            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp);
+            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned);
             return {
                 eventId,
                 filled,
@@ -2640,16 +2890,18 @@ const Database = {
                 shopId, shop.ownerId, sellerId, line.selfId, line.name, quantity, line.price, total, timestamp
             ]).insertId);
             const seller = one('SELECT name FROM characters WHERE id = ?', [sellerId]);
-            const owner = one('SELECT name FROM characters WHERE id = ?', [shop.ownerId]);
+            const owner = one('SELECT name, username FROM characters WHERE id = ?', [shop.ownerId]);
+            const botOwned = String(owner?.username || '').startsWith('bot_');
             write(`INSERT OR IGNORE INTO market_trades (
                 eventKey, occurredAt, channel, sourceType, selfId, itemName,
                 quantity, unitPrice, totalPrice, town,
                 sellerCharacterId, sellerName, buyerCharacterId, buyerName
-            ) VALUES (?, ?, 'wtb', 'afk_player_buy_store', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
-                `afk:${eventId}`, timestamp, line.selfId, line.name, quantity, line.price, total,
+            ) VALUES (?, ?, 'wtb', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+                `afk:${eventId}`, timestamp, botOwned ? 'afk_bot_buy_store' : 'afk_player_buy_store',
+                line.selfId, line.name, quantity, line.price, total,
                 shop.town, sellerId, seller?.name || null, shop.ownerId, owner?.name || null
             ]);
-            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp);
+            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned);
             return {
                 eventId,
                 filled,
@@ -2663,6 +2915,25 @@ const Database = {
         }, 'afk-trade:sell-to-shop'));
     },
 
+    relocateBotAfkTradeShop(ownerId, town, loc) {
+        const characterId = Number(ownerId);
+        if (!characterId || !town || ![loc?.locX, loc?.locY, loc?.locZ].every(Number.isFinite)) {
+            return Promise.reject(new Error('invalid_bot_afk_trade_location'));
+        }
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const shop = one(`SELECT shops.id FROM afk_trade_shops shops
+                JOIN characters ON characters.id = shops.ownerId
+                WHERE shops.ownerId = ? AND shops.status = 'active'
+                AND substr(characters.username, 1, 4) = 'bot_'`, [characterId]);
+            if (!shop) throw new Error('bot_afk_trade_unavailable');
+            write(`UPDATE afk_trade_shops SET town = ?, locX = ?, locY = ?, locZ = ?,
+                revision = revision + 1, updatedAt = ? WHERE id = ?`, [
+                town, Math.round(loc.locX), Math.round(loc.locY), Math.round(loc.locZ), now(), shop.id
+            ]);
+            return afkTradeShopUnsafe(shop.id);
+        }, 'afk-trade:relocate-bot'));
+    },
+
     fetchAfkTradeShops(ownerId = null, { activeOnly = true } = {}) {
         const where = [activeOnly ? "shops.status = 'active'" : '1 = 1'];
         const params = [];
@@ -2670,10 +2941,27 @@ const Database = {
             where.push('shops.ownerId = ?');
             params.push(Number(ownerId));
         }
-        return run(`SELECT shops.id FROM afk_trade_shops shops
-            WHERE ${where.join(' AND ')} ORDER BY shops.id`, params, 'afk-trade:list').then((rows) => (
-            rows.map((row) => afkTradeShopUnsafe(row.id)).filter(Boolean)
-        ));
+        const condition = where.join(' AND ');
+        return Promise.all([
+            run(`SELECT shops.*, characters.name AS ownerName, characters.username AS ownerAccount
+                FROM afk_trade_shops shops JOIN characters ON characters.id = shops.ownerId
+                WHERE ${condition} ORDER BY shops.id`, params, 'afk-trade:list'),
+            run(`SELECT lines.* FROM afk_trade_lines lines
+                JOIN afk_trade_shops shops ON shops.id = lines.shopId
+                WHERE ${condition} ORDER BY lines.shopId, lines.id`, params, 'afk-trade:lines')
+        ]).then(([shops, lines]) => {
+            const byShop = new Map();
+            lines.forEach((line) => {
+                const shopLines = byShop.get(Number(line.shopId)) || [];
+                shopLines.push(line);
+                byShop.set(Number(line.shopId), shopLines);
+            });
+            return shops.map((shop) => ({
+                ...shop,
+                appearance: jsonObject(shop.appearanceJson),
+                lines: byShop.get(Number(shop.id)) || []
+            }));
+        });
     },
 
     fetchAfkTradeNotifications(ownerId, limit = 50) {
@@ -4573,7 +4861,50 @@ const Database = {
     fetchCharacterRecipes(characterId) { return run('SELECT recipeId, type FROM character_recipes WHERE characterId = ?', [characterId], 'recipe:list'); },
     setCharacterRecipe(characterId, recipeId, type) { return run(UPSERT_RECIPE, [characterId, recipeId, type], 'recipe:upsert'); },
 
-    craftInventoryItems(characterId, { materials, product, mp }) {
+    learnColdRecipes(characterId, recipes, coldState) {
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const learned = [];
+            for (const recipe of recipes) {
+                if (one('SELECT recipeId FROM character_recipes WHERE characterId = ? AND recipeId = ?',
+                    [characterId, recipe.recipeId])) continue;
+                const scroll = one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id LIMIT 1',
+                    [characterId, recipe.recipeItemId]);
+                if (!scroll) throw new Error('recipe_scroll_missing');
+                if (Number(scroll.amount) === 1) write('DELETE FROM items WHERE id = ? AND characterId = ?', [scroll.id, characterId]);
+                else write('UPDATE items SET amount = amount - 1 WHERE id = ? AND characterId = ?', [scroll.id, characterId]);
+                write(UPSERT_RECIPE, [characterId, recipe.recipeId, recipe.type]);
+                learned.push({ recipeId: recipe.recipeId, recipeItemId: recipe.recipeItemId, name: recipe.name || '' });
+            }
+            if (!learned.length) return { learned, coldLifeRow: null };
+            syncEconomySnapshotUnsafe(characterId, coldState, learned.map(recipe => recipe.recipeItemId));
+            write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?)) WHERE characterId = ?",
+                [JSON.stringify({ learned, at: now() }), characterId]);
+            return { learned, coldLifeRow: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId])) };
+        }, 'recipe:cold-learn'));
+    },
+
+    purchaseNpcInventoryItem(characterId, { selfId, name, amount, unitPrice, stackable = true, slot = 0, coldState = null }) {
+        const count = Number(amount), price = Number(unitPrice), itemId = Number(selfId);
+        if (!Number.isSafeInteger(count) || count <= 0 || count > 10000
+            || !Number.isSafeInteger(price) || price <= 0
+            || !Number.isSafeInteger(itemId) || itemId <= 0
+            || !Number.isSafeInteger(count * price)) return Promise.reject(new Error('invalid npc purchase'));
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const wallet = one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 57 ORDER BY id LIMIT 1', [characterId]);
+            if (!wallet || Number(wallet.amount) < count * price) return { ok: false, reason: 'insufficient_adena' };
+            write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [Number(wallet.amount) - count * price, wallet.id, characterId]);
+            const existing = stackable ? one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? ORDER BY id LIMIT 1', [characterId, itemId]) : null;
+            if (existing) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [Number(existing.amount) + count, existing.id, characterId]);
+            else for (let index = 0; index < (stackable ? 1 : count); index += 1) {
+                write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, ?, ?)',
+                    [itemId, name || `Item ${itemId}`, stackable ? count : 1, Number(slot) || 0, characterId]);
+            }
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [itemId]);
+            return { ok: true, spent: count * price, amount: count, ...(coldLifeRow ? { coldLifeRow } : {}) };
+        }, 'bot:npc-purchase'));
+    },
+
+    craftInventoryItems(characterId, { materials, product, mp, coldState = null }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const sources = [];
             for (const material of [...materials].sort((left, right) => Number(left.id) - Number(right.id))) {
@@ -4588,7 +4919,10 @@ const Database = {
             if (target) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [productAmount, productId, characterId]);
             else if (product) productId = write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, ?, ?)', [product.selfId, product.name || '', product.amount, product.slot || 0, characterId]).insertId;
             write('UPDATE characters SET mp = ? WHERE id = ?', [mp, characterId]);
-            return { sources, product: product ? { id: productId, amount: productAmount } : null };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState,
+                [...materials.map(item => item.selfId), ...(product ? [product.selfId] : [])], mp);
+            return { sources, product: product ? { id: productId, amount: productAmount } : null,
+                ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'craft:self'));
     },
 
@@ -4692,7 +5026,7 @@ const Database = {
         }, 'item:combine'));
     },
 
-    crystallizeInventoryItem(characterId, { sourceId, sourceSelfId, crystalId, crystalName, crystalAmount }) {
+    crystallizeInventoryItem(characterId, { sourceId, sourceSelfId, crystalId, crystalName, crystalAmount, coldState = null }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const source = one('SELECT id, selfId, amount, equipped FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             if (!source || Number(source.selfId) !== Number(sourceSelfId) || Number(source.amount) !== 1 || Number(source.equipped) !== 0) throw new Error('crystallize source changed');
@@ -4702,7 +5036,8 @@ const Database = {
             write('DELETE FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             if (target) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [amount, id, characterId]);
             else id = write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, 0, ?)', [crystalId, crystalName || '', crystalAmount, characterId]).insertId;
-            return { crystalId, id, amount };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [sourceSelfId, crystalId]);
+            return { crystalId, id, amount, ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'crystalize'));
     },
 
@@ -7178,6 +7513,10 @@ const Database = {
     deleteMacro(characterId, macroId) { return remove('macros', 'characterId = ? AND id = ?', [characterId, macroId], 'macro:delete'); },
     deleteMacros(characterId) { return remove('macros', 'characterId = ?', [characterId], 'macro:delete-all'); },
     deleteMacroShortcuts(characterId, macroId) { return remove('shortcuts', 'characterId = ? AND kind = 4 AND id = ?', [characterId, macroId], 'shortcut:delete-macro'); },
+    setCharacterHenna(characterId, slot, symbolId) { return withCharacterFlush(characterId, () => run(`INSERT INTO character_hennas (characterId, slot, symbolId) VALUES (?, ?, ?)
+        ON CONFLICT(characterId, slot) DO UPDATE SET symbolId = excluded.symbolId`, [characterId, slot, symbolId], 'henna:upsert')); },
+    fetchCharacterHennas(characterId) { return select('character_hennas', ['*'], 'characterId = ?', [characterId], 'henna:list'); },
+    deleteCharacterHenna(characterId, slot) { return withCharacterFlush(characterId, () => remove('character_hennas', 'slot = ? AND characterId = ?', [slot, characterId], 'henna:delete')); },
     updateCharacterLocation(id, coords) { return withCharacterFlush(id, () => update('characters', { locX: coords.locX, locY: coords.locY, locZ: coords.locZ, head: coords.head ?? -1 }, 'id = ?', [id], 'character:location')); },
     updateCharacterName(id, name) { return withCharacterFlush(id, () => update('characters', { name }, 'id = ?', [id], 'character:name')); },
     updateGeneratedBotName(id, name, version) {

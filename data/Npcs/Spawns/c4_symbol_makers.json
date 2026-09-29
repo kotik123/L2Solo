@@ -1,0 +1,128 @@
+[
+    {
+        "selfId": "c4_symbol_makers",
+        "bounds": [],
+        "spawns": [
+            {
+                "selfId": 8046,
+                "name": "Marsden",
+                "coords": [
+                    {
+                        "locX": -81520,
+                        "locY": 152256,
+                        "locZ": -3120,
+                        "head": 49376
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8047,
+                "name": "Kelly",
+                "coords": [
+                    {
+                        "locX": -14708,
+                        "locY": 124160,
+                        "locZ": -3112,
+                        "head": 15972
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8048,
+                "name": "McDermott",
+                "coords": [
+                    {
+                        "locX": 19505,
+                        "locY": 146220,
+                        "locZ": -3072,
+                        "head": 42568
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8049,
+                "name": "Pepper",
+                "coords": [
+                    {
+                        "locX": 83264,
+                        "locY": 150176,
+                        "locZ": -3512,
+                        "head": 24576
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8050,
+                "name": "Thora",
+                "coords": [
+                    {
+                        "locX": 107253,
+                        "locY": 217252,
+                        "locZ": -3592,
+                        "head": 39408
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8051,
+                "name": "Keach",
+                "coords": [
+                    {
+                        "locX": 116320,
+                        "locY": 74688,
+                        "locZ": -2584,
+                        "head": 16300
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8052,
+                "name": "Heid",
+                "coords": [
+                    {
+                        "locX": 80071,
+                        "locY": 55068,
+                        "locZ": -1544,
+                        "head": 40064
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            },
+            {
+                "selfId": 8053,
+                "name": "Kidder",
+                "coords": [
+                    {
+                        "locX": 149044,
+                        "locY": 29160,
+                        "locZ": -2256,
+                        "head": 36864
+                    }
+                ],
+                "total": 1,
+                "respawn": 60,
+                "bias": 0
+            }
+        ]
+    }
+]

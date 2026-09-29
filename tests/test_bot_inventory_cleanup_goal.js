@@ -9,6 +9,8 @@ const NeedsEvaluator = invoke('GameServer/Bot/Goals/NeedsEvaluator');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+const BuyStoreService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService');
+const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 
 DataCache.init();
 
@@ -83,6 +85,60 @@ assert.deepStrictEqual(ItemDisposition.inventoryCleanupNeed(capacityOnlyState, {
     npcOnlySlots: 0,
     limit: ItemDisposition.INVENTORY_SLOT_LIMIT
 }, 'an over-capacity inventory must bypass the market retry cooldown even without NPC-only items');
+
+const boneHelmet = DataCache.items.find((item) => Number(item.selfId) === 45);
+const surplusInventory = (amount) => ({
+    [boneHelmet.selfId]: {
+        selfId: boneHelmet.selfId, name: boneHelmet.template.name,
+        kind: boneHelmet.template.kind, rank: boneHelmet.etc.rank,
+        stackable: false, amount,
+        instances: Array.from({ length: amount }, (_, index) => ({
+            id: 9300000 + index, amount: 1, equipped: false, enchant: 0
+        }))
+    }
+});
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed({ ...state,
+    inventory: surplusInventory(5) }, { now }), null,
+'a few surplus drops must not interrupt farming');
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed({ ...state,
+    inventory: surplusInventory(6) }, { now }), null,
+'the first useful helmet stays available for equipment');
+assert.strictEqual(ItemDisposition.inventoryCleanupNeed({ ...state,
+    inventory: surplusInventory(7) }, { now })?.reason, 'market_surplus_inventory',
+'six surplus pieces should form one NPC cleanup trip');
+
+const stagedArmor = {
+    ...state, level: 47, adena: 1000000,
+    inventory: {
+        1101: { selfId: 1101, amount: 1, equipped: true, slot: 10, rank: 'none', kind: 'Armor.Fabric' },
+        1104: { selfId: 1104, amount: 1, equipped: true, slot: 11, rank: 'none', kind: 'Armor.Fabric' },
+        44: { selfId: 44, amount: 1, equipped: true, slot: 6, rank: 'none', kind: 'Armor.Wear' },
+        432: { selfId: 432, amount: 2, equipped: false, slot: 10, rank: 'd', kind: 'Armor.Fabric' },
+        465: { selfId: 465, amount: 1, equipped: false, slot: 11, rank: 'd', kind: 'Armor.Fabric' },
+        45: { selfId: 45, amount: 1, equipped: false, slot: 6, rank: 'd', kind: 'Armor.Wear' }
+    },
+    stats: { generatedCold: true, classId: 30,
+        equipmentPlan: { status: 'active', strategy: 'market', target: {
+            selfId: 432, name: 'Cursed Tunic', slot: 10
+        } } }
+};
+assert.strictEqual(LifeState.reconcileEquipmentInventory(stagedArmor).inventory[432].equipped, false,
+    'the complete Devotion set can remain stronger than a single D-grade piece');
+assert.strictEqual(ItemDisposition.reservedEquipmentAmounts(stagedArmor)[432], 1);
+assert.strictEqual(ItemDisposition.reservedEquipmentAmounts(stagedArmor)[465], 1);
+assert.strictEqual(ItemDisposition.reservedEquipmentAmounts(stagedArmor)[45], 1);
+assert.strictEqual(ItemDisposition.saleCandidates(stagedArmor, { unlimited: true })
+    .find((item) => item.selfId === 432)?.count, 1,
+    'only duplicate tunics can be sold while one is staged for the next armor kit');
+assert.strictEqual(ItemDisposition.warehouseCandidates(stagedArmor)
+    .find((item) => item.selfId === 432)?.amount, 1);
+assert.strictEqual(BuyStoreService.bidFor(stagedArmor, {
+    type: 'upgrade_gear', target: { itemId: 432, itemName: 'Cursed Tunic', adena: 100000 }, plan: {}
+}), null, 'an owned piece must not receive another AFK buy order');
+assert.strictEqual(GearAcquisitionPlanner.staticNpcUpgradePlan(stagedArmor, {
+    findMarketOffer: (item) => Number(item.selfId) === 432
+        ? { sourceType: 'npc', selfId: 432, price: 10000, town: 'Gludio' } : null
+}), null, 'the NPC bridge must not buy an already staged armor piece again');
 
 const goal = NeedsEvaluator.evaluate(state, { now, spot: { id: 'cruma', name: 'Cruma Tower' } })
     .find((candidate) => candidate.type === 'sell_inventory' && candidate.target.cleanupReason === 'inventory_capacity');

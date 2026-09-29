@@ -9,12 +9,16 @@ const PartyState = invoke('GameServer/Bot/Population/BackgroundPartyState');
 const GoalService = invoke('GameServer/Bot/Goals/GoalService');
 const GoalExecutor = invoke('GameServer/Bot/Goals/GoalExecutor');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
+const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const PopulationService = invoke('GameServer/Bot/Population/PopulationService');
 
 const originals = {
     cachedState: LifeState.cachedState,
+    upsertState: LifeState.upsertState,
     leaveParty: LifeState.leaveParty,
     findById: SpotProfiles.findById,
+    ensure: SpotProfiles.ensure,
+    withMaterialFarmEffort: GearAcquisitionPlanner.withMaterialFarmEffort,
     createOrUpdate: PartyState.createOrUpdate,
     snapshotGoal: GoalService.snapshot,
     reviewGoal: GoalService.review,
@@ -124,14 +128,31 @@ const originals = {
         'a short essential errand must not expire the shared hunt');
     assert.strictEqual(require('../src/GameServer/Bot/Population/PartyMarketBreak').pending(savedParty, now + 16 * 60000).length, 0,
         'a missing bot cannot reserve a slot forever');
+    members[0].stats.equipmentPlan = { status: 'active', strategy: 'craft',
+        materials: [{ selfId: 2068, amount: 1, missing: 1 }] };
+    SpotProfiles.ensure = () => [];
+    GearAcquisitionPlanner.withMaterialFarmEffort = (plan) => ({ ...plan,
+        materials: [{ ...plan.materials[0], farmEffort: 100 }] });
+    LifeState.upsertState = async (state) => {
+        members[0] = state;
+        return state;
+    };
+    reviewed.length = 0;
+    await PopulationService.reconcileWorkerPartyGoals(party, now);
+    assert.strictEqual(members[0].stats.equipmentPlan.materials[0].farmEffort, 100,
+        'a retained clan craft plan in a party must acquire a market comparison cost');
+    assert(reviewed.includes(1), 'newly costed party plans must refresh their market goals immediately');
     console.log('Cold worker party goal reconciliation checks passed');
 })().catch((error) => {
     console.error(error);
     process.exitCode = 1;
 }).finally(() => {
     LifeState.cachedState = originals.cachedState;
+    LifeState.upsertState = originals.upsertState;
     LifeState.leaveParty = originals.leaveParty;
     SpotProfiles.findById = originals.findById;
+    SpotProfiles.ensure = originals.ensure;
+    GearAcquisitionPlanner.withMaterialFarmEffort = originals.withMaterialFarmEffort;
     PartyState.createOrUpdate = originals.createOrUpdate;
     GoalService.snapshot = originals.snapshotGoal;
     GoalService.review = originals.reviewGoal;

@@ -2,9 +2,11 @@ const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const MerchantStoreConfigs = invoke('GameServer/Bot/MerchantStoreConfigs');
 const MarketTelemetry = invoke('GameServer/Bot/Economy/MarketTelemetry');
 const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
+const AfkTrade = invoke('GameServer/AfkTrade/AfkTradeService');
 const StaticMerchantPricing = invoke('GameServer/Bot/Economy/StaticMerchantPricing');
 const DataCache = invoke('GameServer/DataCache');
 const Database = invoke('Database');
+const MarketTradeOverviewReader = invoke('MarketTradeOverviewReader');
 const World = invoke('GameServer/World/World');
 
 function emptyTown() {
@@ -46,11 +48,21 @@ function snapshot() {
     const byTown = {};
     const items = new Map();
     const states = LifeState.allStates(5000);
+    const now = Date.now();
+    const signalsByItem = MarketDemandIndex.indexSignals(states, now);
     const active = states.filter((state) => state.activity === 'merchant' && state.stats?.marketStore);
-    active.forEach((state) => {
-        const store = state.stats.marketStore;
+    const dynamicStores = [
+        ...active.map((state) => ({
+            storeType: state.stats.marketStore.storeType,
+            town: state.stats.marketStore.town || state.currentRegion,
+            items: state.stats.marketStore.items || []
+        })),
+        ...AfkTrade.activeShops().filter((shop) => String(shop.ownerAccount || '').startsWith('bot_'))
+            .map((shop) => ({ storeType: shop.storeType, town: shop.town, items: shop.lines || [] }))
+    ];
+    dynamicStores.forEach((store) => {
         const side = Number(store.storeType || 1) === 3 ? 'wtb' : 'wts';
-        const town = store.town || state.currentRegion || 'Unknown';
+        const town = store.town || 'Unknown';
         const townEntry = byTown[town] || emptyTown();
         townEntry[side === 'wts' ? 'dynamicWts' : 'dynamicWtb'] += 1;
         (store.items || []).forEach((line) => {
@@ -69,9 +81,12 @@ function snapshot() {
         byTown[store.town] = townEntry;
     });
 
-    const rankedItems = Array.from(items.values()).map((item) => {
+    const rankedItems = Array.from(items.values()).sort((left, right) => (
+        (right.wtbUnits + right.wtsUnits) - (left.wtbUnits + left.wtsUnits) || left.selfId - right.selfId
+    )).slice(0, 20).map((item) => {
         const demand = MarketDemandIndex.demandFor(item.selfId, {
-            states,
+            signals: signalsByItem.get(item.selfId) || [],
+            now,
             unitPrice: Number.isFinite(item.minimumWtsPrice) ? item.minimumWtsPrice : 0
         });
         return {
@@ -87,13 +102,11 @@ function snapshot() {
                 fundedUnits: demand.fundedUnits
             }
         };
-    }).sort((left, right) => (
-        (right.wtbUnits + right.wtsUnits) - (left.wtbUnits + left.wtsUnits) || left.selfId - right.selfId
-    ));
+    });
     return {
         dynamic: {
-            wts: active.filter((state) => Number(state.stats.marketStore.storeType || 1) === 1).length,
-            wtb: active.filter((state) => Number(state.stats.marketStore.storeType) === 3).length
+            wts: dynamicStores.filter((store) => Number(store.storeType || 1) === 1).length,
+            wtb: dynamicStores.filter((store) => Number(store.storeType) === 3).length
         },
         fixed: {
             wts: Object.values(MerchantStoreConfigs).filter((store) => Number(store?.storeType) === 1).length,
@@ -231,7 +244,7 @@ function afkStores(shops, itemsById) {
         if (!items.length) return [];
         return [storeRow({
             id: `afk:${Number(shop.id)}`,
-            source: 'afk_player',
+            source: String(shop.ownerAccount || '').startsWith('bot_') ? 'afk_bot' : 'afk_player',
             ownerId: shop.ownerId,
             ownerName: shop.ownerName,
             storeType: shop.storeType,
@@ -259,6 +272,7 @@ function demandItemIds(states) {
 
 function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.transactions(), history = null, now = Date.now(), itemsById = cachedItemsById() } = {}) {
     const items = new Map();
+    const signalsByItem = MarketDemandIndex.indexSignals(states, now);
     const ensure = (selfId) => {
         const id = Number(selfId);
         if (!items.has(id)) {
@@ -312,10 +326,15 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
         ...(transactions.recentNpcTrades || [])
     ].sort((left, right) => Number(right.at || 0) - Number(left.at || 0));
     recentTrades.forEach((trade) => ensure(trade.selfId));
+    const lastTradePrices = new Map();
+    recentTrades.forEach((trade) => {
+        const selfId = Number(trade.selfId);
+        if (!lastTradePrices.has(selfId)) lastTradePrices.set(selfId, trade.unitPrice);
+    });
 
     items.forEach((item) => {
         const demand = MarketDemandIndex.demandFor(item.selfId, {
-            states,
+            signals: signalsByItem.get(item.selfId) || [],
             now,
             unitPrice: Number(item.wts.minPrice || 0)
         });
@@ -334,7 +353,7 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
             item.tradedUnits = Number(totals.items || 0);
             item.tradedAdena = Number(totals.adena || 0);
         }
-        item.lastTradePrice = recentTrades.find((trade) => Number(trade.selfId) === item.selfId)?.unitPrice ?? null;
+        item.lastTradePrice = lastTradePrices.get(item.selfId) ?? null;
         item.towns = [...(townSets.get(item.selfId) || [])].sort();
         item.sources = [...(sourceSets.get(item.selfId) || [])].sort();
     });
@@ -389,9 +408,11 @@ function buildDetail({ states = [], stores = [], transactions = MarketTelemetry.
 async function detail() {
     const itemsById = cachedItemsById();
     const states = LifeState.allStates(5000);
+    const databasePath = Database.stats().path;
     const [afk, history, storeHistory] = await Promise.all([
         Database.fetchAfkTradeShops(null, { activeOnly: true }).catch(() => []),
-        Database.fetchMarketTradeOverview().catch(() => null),
+        (databasePath ? MarketTradeOverviewReader.read(databasePath) : Database.fetchMarketTradeOverview())
+            .catch(() => null),
         Database.fetchMarketStoreHistory().catch(() => null)
     ]);
     const stores = [

@@ -593,11 +593,7 @@ const BotManager = {
                     const reconciledCharacter = reconciledCharacters[0];
                     if (!reconciledCharacter) return null;
                     if (botData.prepareOnly) return reconciledCharacters;
-                    return ShotStock.ensureCharacterStock(reconciledCharacter.id, {
-                        classId: reconciledCharacter.classId,
-                        targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT
-                    })
-                        .then(() => Shared.fetchCharacters(username));
+                    return reconciledCharacters;
                 });
 
             return spawnReady.then((readyCharacters) => {
@@ -1300,64 +1296,8 @@ const BotManager = {
         }
 
         if (request.buff) {
-            // A direct "buff" request is not a general conversation prompt.
-            // Classes without a learned friendly/party support skill (for
-            // example tanks) should simply ignore it instead of advertising a
-            // missing buff service.
-            if (BotSupportPlanner.supportSkills(bot).length === 0) return false;
-
-            const providers = this.sessions
-                .filter((session) => session?.actor && (
-                    session === botSession ||
-                    (session.partyCompanion === true && session.followPlayerSession === playerSession)
-                ))
-                .map((session) => session.actor);
-            if (!providers.includes(bot)) providers.push(bot);
-
-            const supportAction = BotSupportPlanner.nextAction(bot, [{ actor: player, leader: true }], providers);
-            const skill = supportAction?.skill;
-            if (!skill) {
-                const otherProviderCanCast = providers.some((provider) => {
-                    if (provider === bot) return false;
-                    return BotSupportPlanner.supportSkills(provider).some((candidate) => (
-                        Number(provider.fetchMp?.() || 0) >= Number(candidate.fetchConsumedMp?.() || 0)
-                    ));
-                });
-                if (otherProviderCanCast) return false;
-
-                const known = BotSupportPlanner.supportSkills(bot);
-                const names = known.map((candidate) => candidate.fetchName()).join(', ');
-                const requiredMp = known.length > 0
-                    ? Math.min(...known.map((candidate) => Number(candidate.fetchConsumedMp?.() || 0)))
-                    : 0;
-                if (known.length > 0 && bot.fetchMp() < requiredMp) {
-                    this.botTell(botSession, playerSession, `I know ${names}, but I need at least ${requiredMp} MP before buffing.`);
-                } else if (known.length > 0) {
-                    this.botTell(botSession, playerSession, `You already have the party buffs I can improve: ${names}.`);
-                } else {
-                    this.botTell(botSession, playerSession, `I haven't learned any friendly support buffs.`);
-                }
-                return false;
-            }
-            if (bot.fetchMp() < skill.fetchConsumedMp()) {
-                this.botTell(botSession, playerSession, `I need more MP before buffing.`);
-                return false;
-            }
-
-            BotSupportPlanner.reserve(supportAction);
-            // The result is deliberately announced by Attack.remoteHit, after
-            // the effect made it through the real C4 effect stack rules.
-            invoke('GameServer/Bot/AI/BotPartyChat').expectSkillResult(botSession, {
-                target: player,
-                targetSession: playerSession,
-                skill,
-                kind: 'support'
-            });
-            invoke(path.actor).skillExec(botSession, bot, {
-                id: player.fetchId(),
-                selfId: skill.fetchSelfId(),
-                ctrl: false
-            });
+            if (!invoke('GameServer/Bot/Economy/BuffServicePolicy').serviceClass(bot)) return false;
+            invoke('GameServer/Bot/Economy/BuffService').quote(playerSession, botSession);
             return true;
         }
 

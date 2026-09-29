@@ -135,13 +135,14 @@ function isPlayerJoinRequest(text) {
     return invoke('GameServer/Bot/AI/PlayerPartyTakeover').isJoinRequest(text);
 }
 
-function schema() {
+function schema(shopAvailable = false) {
     return {
         type: 'object',
         properties: {
             action: {
                 type: 'string',
-                enum: ['say', 'none', 'come_to_player', 'request_player_join_party']
+                enum: ['say', 'none', 'come_to_player', 'request_player_join_party',
+                    ...(shopAvailable ? ['shop_offer', 'shop_accept', 'shop_decline', 'shop_status'] : [])]
             },
             reply: {
                 type: 'string',
@@ -155,14 +156,19 @@ function schema() {
                 type: 'number',
                 minimum: 0,
                 maximum: 1
-            }
+            },
+            ...(shopAvailable ? {
+                shopItemId: { type: 'integer', description: 'Exact listed item self id for shop_offer.' },
+                shopQuantity: { type: 'integer', description: 'Requested listed quantity for shop_offer.' },
+                shopTotalPrice: { type: 'integer', description: 'Total Adena for the whole shop_offer quantity.' }
+            } : {})
         },
         required: ['action', 'reply', 'reason', 'confidence'],
         additionalProperties: false
     };
 }
 
-function systemPrompt() {
+function systemPrompt(shopAvailable = false) {
     return [
         'You are replying as one Lineage 2 bot in a private chat while the bot is cold/off-screen.',
         BotDialogueStyle,
@@ -174,7 +180,11 @@ function systemPrompt() {
         'Use action=come_to_player only when the player explicitly asks this bot to come, arrive, teleport, or meet them here.',
         'Use action=request_player_join_party only when the player asks to join this bot existing autonomous party. The server, not you, decides whether the party accepts and transfers the whole roster.',
         'The server will validate availability and perform the arrival. Never claim that the bot arrived or joined a party before the server confirms the action.',
-        'A cold chat never activates the bot by itself unless the validated action is come_to_player or request_player_join_party.'
+        'A cold chat never activates the bot by itself unless the validated action is come_to_player or request_player_join_party.',
+        ...(shopAvailable ? [
+            'The bot.shop payload is the current server-owned AFK shop. For a player price proposal about a listed item, use shop_offer with its exact selfId, quantity, and total Adena (47k means 47000). For agreement to an active shop negotiation use shop_accept; for rejection use shop_decline; for a request to inspect or update the shop without an active offer use shop_status.',
+            'Never agree to a new price or claim that a shop changed with action=say. The server validates all shop actions and supplies the actual reply.'
+        ] : [])
     ].join(' ');
 }
 
@@ -195,12 +205,12 @@ async function requestLlmReply(payload, cfg, turn, state, playerSession) {
         playerId,
         turnId: turn.turnId,
         messages: [
-            { role: 'system', content: systemPrompt() },
+            { role: 'system', content: systemPrompt(Boolean(payload.shop)) },
             { role: 'user', content: JSON.stringify(payload) }
         ],
         responseSchema: {
             name: 'bot_remote_chat',
-            schema: schema()
+            schema: schema(Boolean(payload.shop))
         },
         repairSchema: true
     });
@@ -234,6 +244,9 @@ function validateLlmReply(result) {
         action: parsed.action || 'say',
         reason: parsed.reason || 'llm',
         confidence: Number(parsed.confidence || 0),
+        shopItemId: parsed.shopItemId,
+        shopQuantity: parsed.shopQuantity,
+        shopTotalPrice: parsed.shopTotalPrice,
         llm: true,
         usage: result.usage,
         llmTelemetry: result.llmTelemetry
@@ -347,6 +360,19 @@ function deliverReply(playerSession, state, text) {
 }
 
 function replyForStateNow(playerSession, state, text, channel = 'client_tell') {
+    const tradeChat = invoke('GameServer/Bot/Economy/BotAfkTradeChat');
+    const tradeIntent = tradeChat.parse(state, text, playerSession);
+    if (tradeIntent) {
+        return BotConversationService.beginTurn({
+            playerSession, botSession: state, text, channel, source: 'cold_shop_chat'
+        }).then(async (turn) => {
+            const result = await tradeChat.handle(playerSession, state, tradeIntent);
+            const delivered = deliverReply(playerSession, state, result.reply);
+            const reply = { ...result, delivered };
+            await recordReply(playerSession, state, turn, reply, { deterministic: true });
+            return reply;
+        });
+    }
     const cfg = config();
     const availability = BotAvailability.evaluateState(playerSession, state);
     const fallback = {
@@ -387,6 +413,7 @@ function replyForStateNow(playerSession, state, text, channel = 'client_tell') {
                 reasonText: availability.reasonText
             },
             recentEvents: compactEvents(events),
+            shop: tradeChat.context(state, playerSession),
             conversation: turn.context,
             constraints: {
                 privateReply: true,
@@ -433,7 +460,7 @@ function replyForStateNow(playerSession, state, text, channel = 'client_tell') {
         const llmReady = OpenRouterGateway.isConfigured(cfg);
         const estimatedPromptTokens = estimatePromptTokens({
             messages: [
-                { role: 'system', content: systemPrompt() },
+                { role: 'system', content: systemPrompt(Boolean(payload.shop)) },
                 { role: 'user', content: JSON.stringify(payload) }
             ]
         });
@@ -552,6 +579,19 @@ function replyForStateNow(playerSession, state, text, channel = 'client_tell') {
                     return deliver(failed);
                 }
                 const reply = result || fallback;
+                if (reply.action?.startsWith('shop_')) {
+                    const intent = tradeChat.intentForAction(state, playerSession, reply.action, reply);
+                    const actionResult = intent
+                        ? await tradeChat.handle(playerSession, state, intent)
+                        : { ok: false, reason: 'shop_unavailable',
+                            reply: 'I have no active AFK shop to change right now.' };
+                    return deliver({ ...reply, ...actionResult,
+                        reason: actionResult.reason || actionResult.action || 'shop_action',
+                        action: reply.action }, {
+                        actionResult: { ok: actionResult.ok, reason: actionResult.reason || null,
+                            action: actionResult.action || null }
+                    });
+                }
                 if (reply.action === 'request_player_join_party') {
                     const actionResult = await invoke('GameServer/Bot/AI/PlayerPartyTakeover').request({
                         playerSession,

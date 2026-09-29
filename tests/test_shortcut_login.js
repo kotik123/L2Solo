@@ -34,7 +34,8 @@ async function checkLogin(skillsFirst) {
         'GameServer/Clan/ClanService': { clanForActor: () => null },
         'GameServer/Quest/QuestService': { ensureLoaded: async () => {}, active: () => [] },
         'GameServer/World/GameTime': { isNight: () => false },
-        'GameServer/AfkTrade/AfkTradeService': { deliverNotifications: async () => {} }
+        'GameServer/AfkTrade/AfkTradeService': { deliverNotifications: async () => {} },
+        'GameServer/Henna/HennaService': { restore: async () => {} }
     };
     const context = { module: { exports: {} }, invoke: key => {
         assert.ok(dependencies[key], key);

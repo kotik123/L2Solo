@@ -449,7 +449,7 @@ async function assignPlan(member, plan, clan, goal) {
         && number(currentPlan.clanGoal?.clanId) === number(clan.id)
         && String(currentPlan.clanGoal?.goalKey || '') === String(goal.goalKey)
         && samePlanRoute(currentPlan, plan)
-        && ['status', 'strategy', 'recipeId', 'materials', 'craftProviders', 'componentRecipes', 'next'].every(key => (
+        && ['status', 'strategy', 'recipeId', 'materials', 'craftProviders', 'componentRecipes', 'next', 'market'].every(key => (
             JSON.stringify(currentPlan[key]) === JSON.stringify(plan[key])
         ))) {
         return { ok: true, changed: false, memberId: id, handoff };

@@ -23,7 +23,7 @@ for (const npc of world.npc.spawns) {
     assert.deepStrictEqual([npc.fetchLocX(), npc.fetchLocY(), npc.fetchLocZ()],
         [spawn.coords[0].locX, spawn.coords[0].locY, spawn.coords[0].locZ]);
 }
-for (const [id, count] of [[7890, 70], [7891, 77], [7892, 115], [7893, 160]]) {
+for (const [id, count] of [[7890, 70], [7891, 77], [7892, 115], [7893, 157]]) {
     const entries = Shops.fetchForNpc(id);
     assert.strictEqual(entries.length, count);
     assert(entries.every(row => row.price > 0 && DataCache.items.some(item => item.selfId === row.selfId)));

@@ -995,6 +995,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
     let mobHp = pending?.hp ?? mob.maxHp;
     let actions = 0;
     let skillUses = 0;
+    let shotActions = 0;
     let heals = 0;
     let musicUses = 0;
     let summonUses = 0;
@@ -1088,6 +1089,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
                 botReadyAt += actionDelayMs(bot, chargeSkill);
                 continue;
             }
+            shotActions += 1;
             const selected = chooseSkill(bot, vitals.hp, vitals.mp, cooldowns, timestamp + time, charges, rng, {mob,summon:soloFighter.summon});
             const skill = selected?.skill || null;
             const magic = selected?.magic === true;
@@ -1176,7 +1178,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
             effects: soloFighter.profile.effects,
             inventory: fightState.inventory,
             summon: soloFighter.summon || null,
-            debug: { actions, durationMs: time, skillUses, heals, musicUses, summonUses, summonActions, potionsUsed: soloFighter.potionsUsed, mobSelfId: mob.selfId || null, timedOut: !died }
+            debug: { actions, durationMs: time, skillUses, shotActions, heals, musicUses, summonUses, summonActions, potionsUsed: soloFighter.potionsUsed, mobSelfId: mob.selfId || null, timedOut: !died }
         };
     }
 
@@ -1221,7 +1223,7 @@ function resolveFight({ state, spot, pressure, targetNpcId = 0, rng, timestamp =
         effects: soloFighter.profile.effects,
         inventory: fightState.inventory,
         summon: soloFighter.summon || null,
-        debug: { actions, durationMs: time, skillUses, heals, musicUses, summonUses, summonActions, potionsUsed: soloFighter.potionsUsed,
+        debug: { actions, durationMs: time, skillUses, shotActions, heals, musicUses, summonUses, summonActions, potionsUsed: soloFighter.potionsUsed,
             mobSelfId: mob.selfId || null, timedOut: false, overhit }
     };
 }
@@ -1318,6 +1320,7 @@ function resolvePartyFight({ members, spot, targetNpcId = 0, rng = Math.random, 
             cooldowns: { ...(state.stats?.coldCombat?.cooldowns || {}) },
             readyAt: Number(pending?.readyAt?.[state.characterId] || 0),
             actions: 0,
+            shotActions: 0,
             skillUses: 0,
             heals: 0,
             musicUses: 0,
@@ -1434,6 +1437,7 @@ function resolvePartyFight({ members, spot, targetNpcId = 0, rng = Math.random, 
                 next.readyAt += actionDelayMs(next.profile, chargeSkill);
                 continue;
             }
+            next.shotActions += 1;
             const selected = chooseSkill(next.profile, next.vitals.hp, next.vitals.mp, next.cooldowns, timestamp + time, next.charges, rng, {mob,party:true,summon:next.summon});
             const skill = selected?.skill || null;
             let damage = 0;
@@ -1747,6 +1751,7 @@ const BackgroundResolver = {
         let wins = 0;
         let died = false;
         let combatActions = 0;
+        let shotActions = 0;
         let skillUses = 0;
         let heals = 0;
         let musicUses = 0;
@@ -1805,6 +1810,7 @@ const BackgroundResolver = {
             materialize.adena += result.adena;
             materialize.items.push(...result.loot);
             combatActions += Number(result.debug?.actions || 0);
+            shotActions += Number(result.debug?.shotActions || 0);
             combatMs += Number(result.debug?.durationMs || 0);
             skillUses += Number(result.debug?.skillUses || 0);
             heals += Number(result.debug?.heals || 0);
@@ -1889,6 +1895,7 @@ const BackgroundResolver = {
                 spotId: spot.id,
                 route: spot.route || null,
                 combatActions,
+                shotActions,
                 skillUses,
                 heals,
                 musicUses,

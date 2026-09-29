@@ -225,7 +225,26 @@ function startPlayerTrade(playerSession, targetSession) {
 
     const trade = createTrade(playerSession, targetSession, 'player_inbound');
     attachTrade(trade);
+    targetSession.actor.automation?.abortAll?.(targetSession.actor);
     console.info("BotTrade :: %s opened trade with %s", actorName(playerSession), actorName(targetSession));
+    return { ok: true, trade };
+}
+
+function startBuffTrade(playerSession, botSession, offer) {
+    const reason = canStart(playerSession, botSession);
+    if (reason) return { ok: false, reason };
+    if (!offer || Number(offer.playerId) !== Number(playerSession.actor.fetchId())
+        || Number(offer.providerId) !== Number(botSession.actor.fetchId())
+        || !Number.isSafeInteger(Number(offer.price)) || Number(offer.price) <= 0
+        || Number(offer.price) > 2147483647) return { ok: false, reason: 'invalid_buff_quote' };
+    cancel(playerSession, 'replaced', false);
+    cancel(botSession, 'replaced', false);
+    const trade = createTrade(playerSession, botSession, 'player_inbound');
+    trade.buffService = offer;
+    attachTrade(trade);
+    botSession.actor.automation?.abortAll?.(botSession.actor);
+    playerSession.dataSendToMe(ServerResponse.tradeStart(botSession.actor, playerSession.actor.backpack.fetchItems()));
+    console.info('BotTrade :: %s opened buff trade with %s price=%d', actorName(playerSession), actorName(botSession), offer.price);
     return { ok: true, trade };
 }
 
@@ -294,10 +313,13 @@ function addPlayerItem(playerSession, objectId, amount) {
     if (!trade || trade.playerSession !== playerSession) return { ok: false, reason: 'no_active_trade' };
     const item = playerSession.actor.backpack.fetchItemRaw(objectId);
     if (!isSafeOfferItem(item)) return { ok: false, reason: 'item_not_tradable' };
+    if (trade.buffService && Number(item.fetchSelfId()) !== 57) return { ok: false, reason: 'buff_adena_only' };
     const current = trade.playerItems.get(Number(objectId));
     if (!current && trade.playerItems.size >= MAX_TRADE_LINES) return { ok: false, reason: 'trade_line_limit' };
-    const qty = Math.max(1, Math.min(MAX_ITEM_AMOUNT, Math.floor(Number(amount) || 1)));
-    const nextCount = Math.min(item.fetchAmount(), (current?.count || 0) + qty);
+    const limit = trade.buffService && Number(item.fetchSelfId()) === 57
+        ? Number(trade.buffService.price) : MAX_ITEM_AMOUNT;
+    const qty = Math.max(1, Math.min(limit, Math.floor(Number(amount) || 1)));
+    const nextCount = Math.min(item.fetchAmount(), limit, (current?.count || 0) + qty);
     if (nextCount <= 0 || nextCount + minimumRetain(item) > Number(item.fetchAmount())) return { ok: false, reason: 'insufficient_item' };
     const line = lineFor(item, nextCount);
     trade.playerItems.set(Number(objectId), line);
@@ -614,6 +636,7 @@ function activeTradeSummary(session) {
         direction: trade.direction,
         negotiationId: trade.negotiationId || null,
         expectedAdena: trade.expectedAdena || null,
+        buffService: !!trade.buffService,
         createdAt: trade.createdAt,
         expiresAt: trade.expiresAt,
         playerConfirmed: trade.playerConfirmed,
@@ -630,6 +653,7 @@ module.exports = {
     TRADE_RANGE,
     TRADE_TTL_MS,
     activeTradeSummary,
+    startBuffTrade,
     resolveInventoryItem,
     addItem: addPlayerItem,
     cancel,

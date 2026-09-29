@@ -73,9 +73,13 @@ function npcTalk(session, npc) {
     const hasNpcShop = NpcShopBuyLists.fetchForNpc(npc.fetchSelfId()).length > 0
         || NpcExchangeShopLists.fetchForNpc(npc.fetchSelfId()).length > 0
         || !!invoke('GameServer/Items/C4WeaponSAExchange').station(npc.fetchSelfId());
-    if (!QuestService.handlesNpc(npc) || hasNpcShop) {
+    // Temple priests lead with the town Class Transfer/Clan dialog, mirroring
+    // the merchant pattern; any quest branch stays reachable through a
+    // Quest link routed via NpcTalkResponse.
+    const templePriest = invoke('GameServer/World/C4TemplePriests').handles(npc.fetchSelfId());
+    if (!QuestService.handlesNpc(npc) || hasNpcShop || templePriest) {
         showDefaultTalk(session, npc, {
-            questLink: hasNpcShop && QuestService.handlesNpc(npc)
+            questLink: (hasNpcShop || templePriest) && QuestService.handlesNpc(npc)
         });
         return;
     }

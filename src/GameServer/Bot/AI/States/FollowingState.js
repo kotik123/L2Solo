@@ -219,7 +219,7 @@ function companionTownErrand(session, bot, player, BotAI) {
         const offer = MarketOpportunity.findBuyOffers(item.fetchSelfId(), {
             town: town.name,
             sellerCharacterId: bot.fetchId()
-        }).find((candidate) => candidate.sourceType === 'afk_player_buy_store');
+        }).find((candidate) => ['afk_player_buy_store', 'afk_bot_buy_store'].includes(candidate.sourceType));
         if (!offer) return [];
         return [{
             offer,
@@ -272,6 +272,7 @@ function companionTownErrand(session, bot, player, BotAI) {
 }
 
 function townNpcTarget(town, bot, selfId = 0) {
+    if (ShotStock.SHOT_IDS.includes(Number(selfId))) return ShotStock.restockTarget(bot, town.name);
     const from = { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() };
     const role = TownServiceCatalog.ROLES.GENERIC_MERCHANT;
     return TownServiceCatalog.targetFor(role, town.name, {

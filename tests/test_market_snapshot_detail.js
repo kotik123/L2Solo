@@ -3,6 +3,7 @@ const assert = require('assert');
 require('../src/Global');
 
 const MarketSnapshot = invoke('GameServer/Bot/Economy/MarketSnapshot');
+const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
 
 const now = Date.now();
 const itemsById = new Map([[1864, {
@@ -95,6 +96,30 @@ assert.strictEqual(detail.items[0].lastTradePrice, 75);
 assert.deepStrictEqual(detail.items[0].sources, ['bot', 'fixed', 'player']);
 assert.deepStrictEqual(detail.items[0].towns, ['Giran']);
 assert.strictEqual(detail.transactions.recent.length, 1);
+
+const plannedStates = [...states, {
+    characterId: 12,
+    name: 'Crafter Two',
+    adena: 600,
+    currentRegion: 'Dion',
+    stats: {
+        marketWanted: { itemId: 1872, lastMissingAt: now },
+        equipmentPlan: {
+            status: 'active',
+            strategy: 'market',
+            target: { selfId: 9000 },
+            materials: [{ selfId: 1864, missing: 3, marketFallback: true }]
+        }
+    }
+}];
+const signalsByItem = MarketDemandIndex.indexSignals(plannedStates, now);
+for (const selfId of [1864, 1872, 9000]) {
+    assert.deepStrictEqual(
+        MarketDemandIndex.demandFor(selfId, { signals: signalsByItem.get(selfId) || [], now, unitPrice: 80 }),
+        MarketDemandIndex.demandFor(selfId, { states: plannedStates, now, unitPrice: 80 }),
+        `indexed demand must match the original per-item scan for ${selfId}`
+    );
+}
 
 const DataCache = invoke('GameServer/DataCache');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
