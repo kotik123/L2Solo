@@ -79,7 +79,7 @@ async function main() {
                     reply: '',
                     targetPlayerName: '',
                     spotId: '',
-                    buffType: '',
+                    buffPolicyType: '',
                     reason: 'queued_test',
                     confidence: 0.9
                 }) } }]

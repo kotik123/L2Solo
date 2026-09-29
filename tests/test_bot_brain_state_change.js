@@ -64,7 +64,7 @@ async function main() {
                     reply: '',
                     targetPlayerName: '',
                     spotId: '',
-                    buffType: '',
+                    buffPolicyType: '',
                     reason: 'state_change_probe',
                     confidence: 0.9
                 }) } }]

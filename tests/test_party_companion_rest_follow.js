@@ -2841,8 +2841,9 @@ try {
         reason: 'player_order'
     }, [{ id: leader.fetchId(), name: leader.fetchName() }]);
     assert.strictEqual(learnedHealerBuff.applied, true, 'a healer that actually learned the requested friendly buff should be allowed to use it');
-    assert.deepStrictEqual(learnedHealerBuffCast, { id: leader.fetchId(), selfId: 1204, ctrl: false }, 'the direct buff tool should execute the learned skill instead of rejecting the healer role');
-    assert.strictEqual(toolSession.pendingSupportCast?.skillId, 1204, 'a direct buff request must protect its native approach from normal follow movement');
+    assert.strictEqual(learnedHealerBuffCast, null, 'a paid buff must wait for the player to confirm payment');
+    assert.strictEqual(leaderSession.activeTrade?.buffService?.skills?.[0], 1204,
+        'the learned healer buff should be quoted through the normal trade flow');
 
     const huntResult = BotAgentTools.execute(toolSession, {
         action: 'hunt',
@@ -2913,7 +2914,7 @@ try {
         buffType: 'windWalk',
         reason: 'player_order'
     }, [{ id: leader.fetchId(), name: leader.fetchName() }]);
-    assert.strictEqual(rejectedDuringRest.reason, 'low_mp_for_buff', 'the invalidating command should reach its native MP rejection');
+    assert.strictEqual(rejectedDuringRest.reason, 'buff_unavailable', 'an unavailable paid buff must not interrupt resting');
     assert.strictEqual(toolSession.explicitRestOrder, true, 'a rejected mutation must not cancel an active direct rest order');
 
     toolBot.setMp(50);
