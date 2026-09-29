@@ -137,6 +137,8 @@ function consume(session, data) {
         }
         const botCommandText = expandBotCommandAlias(data.text);
 
+        if (invoke('GameServer/Bot/Economy/BuffService').command(session, String(data.text || '').trim())) return;
+
         const itemsCommand = /^\.items(?:\s+(.*))?$/i.exec(String(data.text || '').trim());
         if (itemsCommand) {
             invoke('GameServer/World/Generics/NpcBypasses/NativeItems').open(session, itemsCommand[1] ?? null);

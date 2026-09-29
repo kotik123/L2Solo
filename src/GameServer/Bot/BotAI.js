@@ -418,6 +418,7 @@ const BotAI = {
         // Actual player aggression owns the action window before travel,
         // conversation, recovery or ordinary party/PvE state routing.
         const defendingPvp = !botDead && invoke('GameServer/Bot/AI/BotPvpDefense').tick(session, bot, invoke(path.actor), this);
+        if (!botDead && !defendingPvp && session.buffServiceCasting) return;
         if ((botDead || defendingPvp) && session.clanHallVisit) {
             invoke('GameServer/ClanHall/BotVisit').finish(session, bot, Date.now() + 300000);
         }
@@ -427,6 +428,19 @@ const BotAI = {
 
         if (!botDead && !defendingPvp && session.clanAllianceQuest
             && invoke('GameServer/Bot/AI/ClanAllianceQuestAI').tick(session, bot, invoke(path.actor), this)) return;
+
+        // A native trade remains open while the player edits and confirms the
+        // offer. Do not let the ordinary town or hunting plan move the bot away.
+        if (!botDead && !defendingPvp
+            && BotTradeService.activeTradeSummary(session)) return;
+
+        if (!botDead && !defendingPvp) {
+            const BuffServiceChat = invoke('GameServer/Bot/Economy/BuffServiceChat');
+            if (BuffServiceChat.onDuty(session, tickStartedAt)) {
+                BuffServiceChat.maybeAnnounce(session, tickStartedAt);
+                return;
+            }
+        }
 
         if (lodContext.tier === 'preload' && !botDead && !defendingPvp) {
             if (Math.random() < 0.05) this.triggerFarAwayChatEvent(session, bot);
@@ -455,6 +469,8 @@ const BotAI = {
         if (!botDead && ChatArrivalState.tick(session, bot)) {
             return;
         }
+
+        if (!botDead && invoke('GameServer/Bot/Economy/BuffService').maybeAutoBuy(session, tickStartedAt)) return;
 
         const isCompanion = !!session.followPlayerSession && session.partyCompanion === true;
         const visibleRealPlayers = this.visibleRealPlayers(session, bot, World);

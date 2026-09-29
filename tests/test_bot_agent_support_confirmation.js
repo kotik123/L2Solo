@@ -4,6 +4,7 @@ require('../src/Global');
 
 const BotAgentTools = invoke('GameServer/Bot/AI/BotAgentTools');
 const BotPartyChat = invoke('GameServer/Bot/AI/BotPartyChat');
+const BuffService = invoke('GameServer/Bot/Economy/BuffService');
 const BotRoles = invoke('GameServer/Bot/AI/BotRoles');
 const BotSkillCapabilities = invoke('GameServer/Bot/AI/BotSkillCapabilities');
 const BotAI = invoke('GameServer/Bot/BotAI');
@@ -32,6 +33,7 @@ const originalBuffSkill = BotSkillCapabilities.buffSkill;
 const originalSupportBuffs = BotSkillCapabilities.supportBuffs;
 const originalHealSkill = BotSkillCapabilities.healSkill;
 const originalTell = BotAI.tell;
+const originalBuffQuote = BuffService.quote;
 const messages = [];
 
 try {
@@ -46,84 +48,22 @@ try {
         return true;
     };
 
-    const buffSkill = {
-        fetchSelfId: () =>  buffSkill.id,
-        fetchConsumedMp: () => 10,
-        fetchName: () => 'Might',
-        id: 1068
+    const quotes = [];
+    BuffService.quote = (buyer, seller) => {
+        quotes.push({ buyer, seller });
+        return { ok: true, price: 100 };
     };
-    BotRoles.canBuff = () => true;
-    BotSkillCapabilities.buffSkill = () => buffSkill;
-    BotSkillCapabilities.supportBuffs = () => [{ type: 'might', skill: buffSkill }];
-
+    BotSkillCapabilities.supportBuffs = () => [{ type: 'might' }];
     const buff = BotAgentTools.execute(botSession, {
-        action: 'buff_target',
-        targetPlayerName: 'Slava',
-        buffType: 'might',
-        confidence: 0.95,
-        reply: 'I will buff you.'
+        action: 'buff_target', targetPlayerName: 'Slava', buffType: 'might',
+        confidence: 0.95, reply: 'I can quote my buffs.'
     }, [{ id: 20, name: 'Slava' }]);
     assert.strictEqual(buff.applied, true);
-    assert.strictEqual(buff.reason, 'buff_requested:might');
-    assert.strictEqual(messages.length, 0, 'a buff request must not speak before native effect confirmation');
-    assert.strictEqual(botSession.pendingPartyChatResult.skillId, 1068);
-
-    const fullTarget = actor(21, 'FullTarget', 100, 0);
-    const fullTargetSession = { actor: fullTarget, accountId: 'player_full_target' };
-    World.user = { sessions: [targetSession, fullTargetSession] };
-    for (let index = 0; index < 20; index += 1) {
-        EffectStore.apply(fullTarget, {
-            key: `full_target_buff_${index}`,
-            id: 6000 + index,
-            level: 1,
-            type: 'buff',
-            durationMs: 10 * 60 * 1000
-        });
-    }
-    botSession.pendingPartyChatResult = undefined;
-    const fullBuff = BotAgentTools.execute(botSession, {
-        action: 'buff_target',
-        targetPlayerName: 'FullTarget',
-        buffType: 'might',
-        confidence: 0.95,
-        reply: 'I will buff you.'
-    }, [{ id: 21, name: 'FullTarget' }]);
-    assert.strictEqual(fullBuff.applied, false, 'a direct buff request must not cast into a full buff bar');
-    assert.strictEqual(fullBuff.reason, 'buff_capacity', 'a full buff bar should report capacity instead of queuing a cast');
-    assert.strictEqual(botSession.pendingPartyChatResult, undefined, 'a rejected capacity request must not announce a pending cast');
-
-    const partyAuraSkill = {
-        fetchSelfId: () => partyAuraSkill.id,
-        fetchConsumedMp: () => 10,
-        fetchName: () => 'Party Aura',
-        fetchTargetKind: () => 'party',
-        fetchDistance: () => -1,
-        fetchSemantic: () => ({
-            effectType: 'buff',
-            effect: 'party_aura',
-            target: 'party',
-            radius: 1000
-        }),
-        id: 5200
-    };
-    bot.session = botSession;
-    botSession.partyCompanion = true;
-    botSession.followPlayerSession = targetSession;
-    fullTargetSession.partyCompanion = true;
-    fullTargetSession.followPlayerSession = targetSession;
-    BotSkillCapabilities.buffSkill = (_actor, requestedType) => requestedType === 'party_aura'
-        ? partyAuraSkill
-        : buffSkill;
-    const fullPartyAura = BotAgentTools.execute(botSession, {
-        action: 'buff_target',
-        targetPlayerName: 'Slava',
-        buffType: 'party_aura',
-        confidence: 0.95,
-        reply: 'I will buff the party.'
-    }, [{ id: 20, name: 'Slava' }]);
-    assert.strictEqual(fullPartyAura.applied, false, 'a direct party aura must not cast when one party member has no capacity');
-    assert.strictEqual(fullPartyAura.reason, 'buff_capacity', 'party aura capacity failures should report the full recipient that blocks the cast');
-    assert.strictEqual(botSession.pendingPartyChatResult, undefined, 'a rejected party aura must not announce a pending cast');
+    assert.strictEqual(buff.reason, 'buff_quote');
+    assert.deepStrictEqual(quotes, [{ buyer: targetSession, seller: botSession }]);
+    assert.strictEqual(botSession.pendingPartyChatResult, undefined,
+        'a buff quote must not queue an unpaid cast');
+    assert.strictEqual(messages.length, 0, 'the action must not claim a completed buff');
 
     botSession.pendingPartyChatResult = undefined;
     const healSkill = {
@@ -156,5 +96,6 @@ try {
     BotSkillCapabilities.supportBuffs = originalSupportBuffs;
     BotSkillCapabilities.healSkill = originalHealSkill;
     BotAI.tell = originalTell;
+    BuffService.quote = originalBuffQuote;
     BotPartyChat.cancelExpectedSkillResult({ pendingPartyChatResult: undefined });
 }

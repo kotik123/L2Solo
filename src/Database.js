@@ -2237,6 +2237,111 @@ const Database = {
         return run(statement[0], statement[1] || [], operation, statement[2]?.read ?? null, statement[2]?.onTiming);
     },
 
+    transferBuffServiceAdena({ payerId, providerId, amount, expectedSpotId = null } = {}) {
+        const payer = Number(payerId), provider = Number(providerId), price = Number(amount);
+        if (!Number.isSafeInteger(payer) || payer <= 0 || !Number.isSafeInteger(provider) || provider <= 0
+            || payer === provider || !Number.isSafeInteger(price) || price <= 0) {
+            return Promise.resolve({ ok: false, reason: 'invalid_payment' });
+        }
+        return withCharacterFlush(payer, () => withCharacterFlush(provider, () => inTransaction(() => {
+            const payerCharacter = one('SELECT id FROM characters WHERE id = ?', [payer]);
+            const providerCharacter = one('SELECT id FROM characters WHERE id = ?', [provider]);
+            if (!payerCharacter || !providerCharacter) return { ok: false, reason: 'missing_character' };
+            const payerState = one('SELECT phase, activity, partyId, spotId FROM bot_life_state WHERE characterId = ?', [payer]);
+            const providerState = one('SELECT phase, activity, partyId, spotId FROM bot_life_state WHERE characterId = ?', [provider]);
+            if (expectedSpotId !== null) {
+                if (!payerState || !providerState || payerState.phase !== 'cold' || providerState.phase !== 'cold'
+                    || payerState.spotId !== expectedSpotId || providerState.spotId !== expectedSpotId
+                    || payerState.partyId || providerState.partyId
+                    || !['hunting', 'resting'].includes(payerState.activity)
+                    || !['hunting', 'resting'].includes(providerState.activity)) {
+                    return { ok: false, reason: 'spot_or_activity_changed' };
+                }
+            }
+            const balance = afkTradeAdenaRowsUnsafe(payer)
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (balance < price) return { ok: false, reason: 'not_enough_adena' };
+            afkTradeDebitAdenaUnsafe(payer, price);
+            const providerAdenaId = afkTradeCreditAdenaUnsafe(provider, price);
+            const payerRows = afkTradeAdenaRowsUnsafe(payer);
+            const payerBalance = payerRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            const providerBalance = afkTradeAdenaRowsUnsafe(provider)
+                .reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (payerState) syncAdenaSnapshotUnsafe(payer, payerBalance);
+            if (providerState) syncAdenaSnapshotUnsafe(provider, providerBalance);
+            return { ok: true, payerBalance, providerBalance,
+                payerAdenaId: Number(payerRows[0]?.id || 0), providerAdenaId };
+        }, 'buff-service:payment')));
+    },
+
+    purchaseColdBuffs({ payerId, providerId, spotId, payerRevision, providerRevision,
+        price, mpCost, effects, timestamp = now() } = {}) {
+        const payer = Number(payerId), provider = Number(providerId);
+        const fee = Number(price), mana = Number(mpCost);
+        if (!Number.isSafeInteger(payer) || payer <= 0 || !Number.isSafeInteger(provider) || provider <= 0
+            || payer === provider || !spotId || !Number.isSafeInteger(fee) || fee < 0
+            || !Number.isSafeInteger(mana) || mana < 0 || !Array.isArray(effects)
+            || effects.length < 1 || effects.length > 20) return Promise.resolve({ ok: false, reason: 'invalid_request' });
+        return withCharacterFlush(payer, () => withCharacterFlush(provider, () => inTransaction(() => {
+            const rows = [payer, provider].map(id => one('SELECT * FROM bot_life_state WHERE characterId = ?', [id]));
+            const [buyer, seller] = rows;
+            if (!buyer || !seller || [buyer, seller].some(row => row.phase !== 'cold'
+                || row.spotId !== spotId || row.partyId || !['hunting', 'resting'].includes(row.activity))) {
+                return { ok: false, reason: 'spot_or_activity_changed' };
+            }
+            if (Number(buyer.simulationRevision) !== Number(payerRevision)
+                || Number(seller.simulationRevision) !== Number(providerRevision)) return { ok: false, reason: 'stale_snapshot' };
+            if (Number(seller.mp || 0) < mana) return { ok: false, reason: 'not_enough_mp' };
+            const buyerStats = parsedObject(buyer.statsJson), sellerStats = parsedObject(seller.statsJson);
+            if (!buyerStats || !sellerStats) return { ok: false, reason: 'invalid_stats' };
+            const sellerSkills = sellerStats.coldCombat?.skills?.length
+                ? sellerStats.coldCombat.skills
+                : invoke('GameServer/Bot/Population/ColdCombatProfile').skillRecordsFromTree(
+                    Number(sellerStats.classId || sellerStats.classProgressionClassId || 0), Number(seller.level || 1));
+            const known = new Map(sellerSkills.map(skill => [Number(skill.selfId), Number(skill.level)]));
+            if (effects.some(effect => !known.has(Number(effect.id)) || known.get(Number(effect.id)) < Number(effect.level))) {
+                return { ok: false, reason: 'skill_changed' };
+            }
+            const currentEffects = (buyerStats.coldCombat?.effects || []).filter(effect => Number(effect.expiresAt || 0) > timestamp);
+            if (effects.some(next => currentEffects.some(effect =>
+                String(effect.stackFamily || effect.key) === String(next.stackFamily || next.key)
+                    && Number(effect.level || 0) >= Number(next.level || 0)
+                    && Number(effect.expiresAt || 0) - timestamp > 120000))) {
+                return { ok: false, reason: 'already_buffed' };
+            }
+            const payerBalance = afkTradeAdenaRowsUnsafe(payer).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            if (payerBalance < fee) return { ok: false, reason: 'not_enough_adena' };
+            if (fee > 0) {
+                afkTradeDebitAdenaUnsafe(payer, fee);
+                afkTradeCreditAdenaUnsafe(provider, fee);
+            }
+            const nextEffects = currentEffects.filter(effect => !effects.some(next =>
+                String(effect.stackFamily || effect.key) === String(next.stackFamily || next.key)));
+            nextEffects.push(...effects);
+            buyerStats.coldCombat = { ...(buyerStats.coldCombat || {}), effects: nextEffects };
+            buyerStats.lastBuffServicePurchase = { providerId: provider, price: fee, count: effects.length, at: timestamp };
+            sellerStats.lastBuffService = { buyerId: payer, price: fee, count: effects.length, at: timestamp };
+            const nextMp = Math.max(0, Number(seller.mp) - mana);
+            const buyerAdena = payerBalance - fee;
+            const sellerAdena = afkTradeAdenaRowsUnsafe(provider).reduce((sum, row) => sum + Number(row.amount || 0), 0);
+            const buyerInventory = parsedObject(buyer.inventorySummary) || {};
+            const sellerInventory = parsedObject(seller.inventorySummary) || {};
+            buyerInventory['57'] = { ...(buyerInventory['57'] || {}), selfId: 57, name: 'Adena', amount: buyerAdena };
+            sellerInventory['57'] = { ...(sellerInventory['57'] || {}), selfId: 57, name: 'Adena', amount: sellerAdena };
+            write(`UPDATE bot_life_state SET statsJson = ?, inventorySummary = ?, adena = ?,
+                simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+            [JSON.stringify(buyerStats), JSON.stringify(buyerInventory), buyerAdena, timestamp, payer]);
+            write(`UPDATE bot_life_state SET statsJson = ?, inventorySummary = ?, adena = ?, mp = ?,
+                simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+            [JSON.stringify(sellerStats), JSON.stringify(sellerInventory), sellerAdena, nextMp, timestamp, provider]);
+            write('UPDATE characters SET mp = ? WHERE id = ?', [nextMp, provider]);
+            return { ok: true, buyerAdena, sellerAdena, nextMp,
+                buyerRevision: Number(buyer.simulationRevision) + 1,
+                sellerRevision: Number(seller.simulationRevision) + 1,
+                buyerStats, sellerStats, buyerInventory, sellerInventory };
+        }, 'buff-service:cold')));
+    },
+
     recordMarketTrade(trade = {}) {
         const eventKey = String(trade.eventKey || '').slice(0, 180);
         const occurredAt = Math.max(1, Math.floor(Number(trade.at || trade.occurredAt || now())));

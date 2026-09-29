@@ -142,6 +142,7 @@ class ColdSimulationCoordinator {
         this.restartTimer = null;
         this.watchdogTimer = null;
         this.reconcileTimer = null;
+        this.buffServiceTimer = null;
         this.snapshotContinuationTimer = null;
         this.recoveryTimer = null;
         this.renewalTimer = null;
@@ -297,6 +298,11 @@ class ColdSimulationCoordinator {
             this.reconcileTimer = setInterval(() => {
                 this.sendSnapshots(false).catch((error) => this.recordError(error));
             }, Math.max(2000, Number(Config.coldWorkerSnapshotRefreshMs) || 10000));
+            this.buffServiceTimer = setInterval(() => {
+                if (this.stopping || !this.snapshotsLoaded) return;
+                invoke('GameServer/Bot/Economy/ColdBuffService').tick()
+                    .catch((error) => this.recordError(error));
+            }, 60000);
             this.recoveryTimer = setInterval(() => {
                 ColdSimulationOwner.recoverExpiredLeases().catch((error) => this.recordError(error));
             }, Math.max(1000, Number(Config.coldOwnerRecoveryIntervalMs) || 5000));
@@ -319,6 +325,7 @@ class ColdSimulationCoordinator {
             }, Math.max(30000, Number(Config.partyHistoryCleanupIntervalMs) || 60 * 60 * 1000));
             this.watchdogTimer.unref?.();
             this.reconcileTimer.unref?.();
+            this.buffServiceTimer.unref?.();
             this.recoveryTimer.unref?.();
             this.renewalTimer.unref?.();
             this.historyCleanupTimer.unref?.();
@@ -1613,6 +1620,7 @@ class ColdSimulationCoordinator {
         await this.competitionActions.stop();
         if (this.watchdogTimer) clearInterval(this.watchdogTimer);
         if (this.reconcileTimer) clearInterval(this.reconcileTimer);
+        if (this.buffServiceTimer) clearInterval(this.buffServiceTimer);
         if (this.snapshotContinuationTimer) clearTimeout(this.snapshotContinuationTimer);
         if (this.recoveryTimer) clearInterval(this.recoveryTimer);
         if (this.renewalTimer) clearInterval(this.renewalTimer);
@@ -1620,6 +1628,7 @@ class ColdSimulationCoordinator {
         if (this.restartTimer) clearTimeout(this.restartTimer);
         this.watchdogTimer = null;
         this.reconcileTimer = null;
+        this.buffServiceTimer = null;
         this.snapshotContinuationTimer = null;
         this.recoveryTimer = null;
         this.renewalTimer = null;

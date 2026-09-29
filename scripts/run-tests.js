@@ -292,6 +292,7 @@ const tests = [
     'tests/test_bot_physical_warehouse_errand.js',
     'tests/test_bot_cold_market_trade_chat.js',
     'tests/test_bot_trade_chat.js',
+    'tests/test_buff_service.js',
     'tests/test_bot_cold_combat.js',
     'tests/test_cold_raid_encounter.js',
     'tests/test_raid_completion.js',

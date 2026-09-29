@@ -28,6 +28,7 @@ async function tradeDone(session, buffer) {
     }
 
     let tradeSummary = null;
+    let reservedBuffTrade = null;
     try {
         const confirmation = BotTradeService.confirmPlayerTrade(session);
         if (!confirmation.ok) {
@@ -39,6 +40,30 @@ async function tradeDone(session, buffer) {
         }
 
         tradeSummary = BotTradeService.activeTradeSummary(session);
+        const botSession = confirmation.trade?.botSession;
+        const adenaOnlyToBuffer = tradeSummary?.direction === 'player_inbound'
+            && !tradeSummary.buffService && !tradeSummary.negotiationId && tradeSummary.botItems?.length === 0
+            && tradeSummary.playerItems?.length === 1 && Number(tradeSummary.playerItems[0].selfId) === 57
+            && invoke('GameServer/Bot/Economy/BuffServicePolicy').serviceClass(botSession?.actor);
+        if (adenaOnlyToBuffer) {
+            BotTradeService.cancel(session, 'buff_payment_requires_command', false);
+            BotManager.botTell(botSession, session,
+                'To buy buffs, target me and type .buff. I will open the payment trade for you.');
+            session.dataSendToMe(ServerResponse.tradeDone(false));
+            return;
+        }
+        if (confirmation.trade?.buffService) {
+            if (confirmation.trade.buffServiceCommitting) return;
+            const BuffService = invoke('GameServer/Bot/Economy/BuffService');
+            const admission = BuffService.reserveNativeTrade(confirmation.trade);
+            if (!admission.ok) {
+                BotTradeService.cancel(session, 'buff_offer_invalid', false);
+                BotManager.botTell(botSession, session, admission.reason);
+                session.dataSendToMe(ServerResponse.tradeDone(false));
+                return;
+            }
+            reservedBuffTrade = confirmation.trade;
+        }
         console.info(
             "TradeDone :: %s confirmed native bot trade id=%s bot=%s playerItems=%j botItems=%j",
             playerName,
@@ -77,6 +102,18 @@ async function tradeDone(session, buffer) {
         }
 
         if (result.idempotent) {
+            session.dataSendToMe(ServerResponse.tradeDone(true));
+            return;
+        }
+
+        if (reservedBuffTrade) {
+            const buffTrade = reservedBuffTrade;
+            reservedBuffTrade = null;
+            buffTrade.buffServiceCompletion = Promise.resolve()
+                .then(() => invoke('GameServer/Bot/Economy/BuffService').completeNativeTrade(buffTrade))
+                .catch(error => utils.infoWarn('BuffService', 'native buff fulfillment failed: %s', error.stack || error.message))
+                .finally(() => invoke('GameServer/Bot/Economy/BuffService').releaseNativeTrade(buffTrade));
+            session.dataSendToMe(ServerResponse.itemsList(session.actor.backpack.fetchItems()));
             session.dataSendToMe(ServerResponse.tradeDone(true));
             return;
         }
@@ -123,6 +160,8 @@ async function tradeDone(session, buffer) {
         BotTradeService.cancel(session);
         session.dataSendToMe(ServerResponse.actionFailed());
         session.dataSendToMe(ServerResponse.tradeDone(false));
+    } finally {
+        if (reservedBuffTrade) invoke('GameServer/Bot/Economy/BuffService').releaseNativeTrade(reservedBuffTrade);
     }
 }
 
