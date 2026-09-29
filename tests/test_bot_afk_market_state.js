@@ -104,7 +104,7 @@ async function run() {
         enchant: 0, equipped: false, slot: 0 });
     const withLoot = await LifeState.syncExternalInventory(ownerId, 'test_new_loot', LifeState.snapshot(ownerId));
     ListingPolicy.evaluate = () => ({ listings: [{ selfId: 1865, name: 'Varnish',
-        count: 2, price: 100, rank: 'none' }] });
+        count: 23, price: 100, rank: 'none' }] });
     const refreshed = await BotAfkMarket.reconcile(withLoot, sellGoal);
     assert.strictEqual(refreshed.changed, true, 'new loot should refresh the same persistent shop');
     assert.strictEqual(refreshed.shop.lines[0].count, 23);
@@ -266,9 +266,8 @@ async function run() {
     }, 'test_bot_afk_fallback');
     ListingPolicy.evaluate = () => ({ listings: [] });
     const fallback = await BotAfkMarket.reconcile(fallbackState, sellGoal);
-    assert.strictEqual(fallback.changed, true, 'tradeable material should list without current demand');
-    assert.strictEqual(fallback.shop.lines[0].selfId, 1865);
-    assert.strictEqual((await BotAfkMarket.withdraw(fallbackId)).stopped, true);
+    assert.strictEqual(fallback.changed, false, 'material fallback must not bypass listing policy');
+    assert.strictEqual(AfkTrade.findOwnerProjection(fallbackId), null);
     assert.strictEqual(amount(await Database.fetchItems(fallbackId), 1865), 20);
 
     ListingPolicy.evaluate = originalEvaluate;
@@ -453,6 +452,12 @@ async function run() {
         assert.deepStrictEqual(migratedLot.lines.map((line) => Number(line.selfId)), [1962]);
         assert.strictEqual(amount(await Database.fetchItems(oldOwnerId), 1875), 1);
         assert.strictEqual(amount(await Database.fetchItems(oldOwnerId), 1962), 0);
+        await Database.execute(["UPDATE afk_trade_shops SET title = 'Soulshot: C-grade x74 +2' WHERE id = ?", [migratedLot.id]]);
+        AfkTrade._resetForTests();
+        await AfkTrade.init();
+        assert.strictEqual(AfkTrade.findOwnerProjection(oldOwnerId).shop.title, 'Karmian Tunic Pattern',
+            'restore repairs stale titles even when no stock or location needs changing');
+        assert.strictEqual((await Database.fetchAfkTradeShops(oldOwnerId))[0].title, 'Karmian Tunic Pattern');
     } finally {
         if (originalRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;
         else process.env.L2NODE_PROGRESSION_RATE = originalRate;
@@ -498,6 +503,70 @@ async function run() {
     assert.strictEqual((await Database.fetchItems(gearBuyerId))
         .find((item) => Number(item.selfId) === 45)?.equipped, 1,
         'the physical inventory must keep the equipped slot after a restart');
+
+    ListingPolicy.evaluate = originalEvaluate;
+    await Database.createAccount('bot_afk_recipe_seller', 'pw');
+    await Database.createAccount('bot_afk_recipe_buyer', 'pw');
+    const recipeSellerId = Number((await Database.createCharacter('bot_afk_recipe_seller',
+        character('RecipeSeller'))).insertId);
+    const recipeBuyerId = Number((await Database.createCharacter('bot_afk_recipe_buyer',
+        character('RecipeBuyer'))).insertId);
+    const materialRows = [];
+    for (const selfId of [1864, 1865, 1866]) {
+        const inserted = await Database.setItem(recipeSellerId, { selfId, name: `Material ${selfId}`,
+            amount: 10, equipped: false, slot: 0 });
+        materialRows.push({ objectId: Number(inserted.insertId), selfId,
+            name: `Material ${selfId}`, count: 10, price: 100000, stackable: true });
+    }
+    await Database.setItem(recipeSellerId, { selfId: 3033, name: 'Recipe: Spiritshot C',
+        amount: 1, equipped: false, slot: 0 });
+    await Database.setItem(recipeBuyerId, { selfId: 57, name: 'Adena', amount: 1000000,
+        equipped: false, slot: 0 });
+    await LifeState.upsertState({ characterId: recipeSellerId, accountName: 'bot_afk_recipe_seller',
+        name: 'RecipeSeller', phase: 'cold', activity: 'hunting', level: 45, adena: 0,
+        currentRegion: 'Giran', loc: { locX: 81100, locY: 148000, locZ: -3466 },
+        inventory: LifeState.inventorySummaryFromItems(await Database.fetchItems(recipeSellerId)),
+        vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
+        stats: { generatedCold: true, classId: 28 }, timing: {} }, 'recipe_seller_ready');
+    await LifeState.upsertState({ characterId: recipeBuyerId, accountName: 'bot_afk_recipe_buyer',
+        name: 'RecipeBuyer', phase: 'cold', activity: 'hunting', level: 60, adena: 1000000,
+        currentRegion: 'Giran', loc: { locX: 81100, locY: 148000, locZ: -3466 },
+        inventory: LifeState.inventorySummaryFromItems(await Database.fetchItems(recipeBuyerId)),
+        vitals: { hp: 100, maxHp: 100, mp: 100, maxMp: 100 },
+        stats: { generatedCold: true, classId: 57,
+            shotRecipeDemand: { itemId: 3033, amount: 1, maxSpend: 1000000, at: Date.now() } },
+        timing: {} }, 'recipe_buyer_ready');
+    await AfkTrade.publishBot(recipeSellerId, { storeType: AfkTrade.SELL, title: 'Materials',
+        town: 'Giran', locX: 81100, locY: 148000, locZ: -3466,
+        appearance: { model: character('RecipeSeller') }, lines: materialRows });
+    const recipeShop = await BotAfkMarket.reconcile(LifeState.snapshot(recipeSellerId), sellGoal);
+    assert.strictEqual(recipeShop.changed, true,
+        'funded recipe demand should refresh a full three-line AFK shop');
+    assert(recipeShop.shop.lines.some((line) => Number(line.selfId) === 3033),
+        'the demanded recipe must take one slot while displaced materials return to inventory');
+    await Database.setItem(recipeSellerId, { selfId: 2511, name: 'Spiritshot: C-grade',
+        amount: 1000, equipped: false, slot: 0 });
+    const shotSeller = await LifeState.syncExternalInventory(recipeSellerId,
+        'test_shots_crafted', LifeState.snapshot(recipeSellerId));
+    await LifeState.upsertState({ ...shotSeller, stats: { ...shotSeller.stats,
+        shotCraft: { productId: 2511, amount: 1000, at: Date.now() }
+    } }, 'shot_seller_ready');
+    const shotBuyer = LifeState.snapshot(recipeBuyerId);
+    await LifeState.upsertState({ ...shotBuyer, stats: { ...shotBuyer.stats,
+        shotDemand: { itemId: 2511, amount: 1000, maxSpend: 1000000, at: Date.now() }
+    } }, 'shot_buyer_ready');
+    const shotShop = await BotAfkMarket.reconcile(LifeState.snapshot(recipeSellerId), sellGoal);
+    assert(shotShop.shop.lines.some((line) => Number(line.selfId) === 2511),
+        'funded crafted shots must take a slot in a full AFK shop');
+    assert(shotShop.shop.lines.some((line) => Number(line.selfId) === 3033),
+        'a shot listing must retain the funded recipe listing');
+    await Database.setItem(recipeSellerId, { selfId: 3032, name: 'Recipe: Spiritshot D',
+        amount: 1, equipped: false, slot: 0 });
+    await LifeState.syncExternalInventory(recipeSellerId,
+        'test_d_recipe_drop', LifeState.snapshot(recipeSellerId));
+    const scarceRecipeShop = await BotAfkMarket.reconcile(LifeState.snapshot(recipeSellerId), sellGoal);
+    assert(scarceRecipeShop.shop.lines.some((line) => Number(line.selfId) === 3032),
+        'a scarce D-grade shot recipe must enter a full shop without an explicit buyer');
     await AfkTrade._resetForTests();
     BotAfkMarket._resetForTests();
     console.log('Bot AFK market state checks passed');

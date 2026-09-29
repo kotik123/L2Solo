@@ -1,3 +1,4 @@
+const LotPolicy = require('./MarketLotPolicy');
 const DataCache = invoke('GameServer/DataCache');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const MarketDemandIndex = invoke('GameServer/Bot/Economy/MarketDemandIndex');
@@ -33,7 +34,8 @@ function allowsLowGradeMarket() {
 }
 
 function listOrWarehouse(item, decision) {
-    if (listingPrice(item, decision) !== null) return decision;
+    const price = listingPrice(item, decision);
+    if (price !== null && LotPolicy.viable({ ...item, count: decision.listCount ?? item.count, price })) return decision;
     return surplusGearDecision(item, 'non_competitive_floor', decision.market);
 }
 
@@ -48,6 +50,7 @@ function classify(state, item, options = {}) {
     if (!item || Number(item.selfId || 0) <= 0 || Number(item.count || 0) <= 0) {
         return { action: 'ignore', reason: 'invalid_item' };
     }
+    if (!LotPolicy.viable(item)) return { action: 'warehouse', reason: 'small_material_lot' };
     if (ItemDisposition.isNpcOnlyItem(item)) {
         return { action: 'npc', reason: 'npc_only_item' };
     }
@@ -86,6 +89,18 @@ function classify(state, item, options = {}) {
         market.competitiveUnits = competitiveUnits;
     }
     const fundedUnits = Math.max(0, Number(market.demand.fundedUnits || 0));
+    if (ItemDisposition.isMarketRecipeItem(item) && fundedUnits > market.supply.units) {
+        return listOrWarehouse(item, {
+            action: 'list', reason: 'active_demand',
+            listCount: Math.min(Number(item.count), fundedUnits - market.supply.units), market
+        });
+    }
+    if (ItemDisposition.isMarketRecipeItem(item) && market.supply.units < SPECULATIVE_SUPPLY_LIMIT) {
+        return listOrWarehouse(item, {
+            action: 'list', reason: 'scarce_recipe',
+            listCount: Math.min(Number(item.count), SPECULATIVE_SUPPLY_LIMIT - market.supply.units), market
+        });
+    }
     if (isGear(item) && fundedUnits <= market.supply.units && market.recentBuyers > 0) {
         const available = Math.max(0, market.recentBuyers - market.competitiveUnits);
         if (available > 0) return listOrWarehouse(item, {
@@ -93,6 +108,20 @@ function classify(state, item, options = {}) {
             listCount: Math.min(Number(item.count), available), market
         });
         return surplusGearDecision(item, 'market_oversupply', market);
+    }
+    if (LotPolicy.material(item) && fundedUnits <= market.supply.units) {
+        // Keep a small useful shelf for players even before explicit bot demand.
+        // Existing supply is global; every new seller must share this allowance.
+        const recentBuyers = Number(options.buyerActivity?.get?.(Number(item.selfId))
+            ?? MarketBuyerActivity.count(item.selfId)) || 0;
+        const sellerLimit = Math.max(2, Math.min(4, recentBuyers));
+        const units = Math.max(0, 200 - market.supply.units);
+        const count = Math.min(Number(item.count), units);
+        if (market.supply.sellers < sellerLimit && count > 0
+            && LotPolicy.viable({ ...item, count, price: unitPrice })) {
+            return listOrWarehouse(item, { action: 'list', reason: 'material_liquidity', listCount: count, market });
+        }
+        return { action: 'warehouse', reason: 'material_oversupply', market };
     }
     if (market.demand.bots <= 0 && Number(market.demand.afkOrders || 0) <= 0) {
         if (lowGradeGear) return surplusGearDecision(item, 'low_grade_no_funded_demand', market);
@@ -150,7 +179,18 @@ function listingPrice(item, decision) {
     const competition = Math.min(Number(decision?.market?.supply?.minimumPrice || Infinity), BotMarketPricing.npcPrice(item));
     if (!Number.isFinite(competition) || competition <= 0) return Math.max(minimum, preferred);
     const competitivePrice = Math.floor(competition * 0.98);
-    if (minimum > competitivePrice) return null;
+    if (minimum > competitivePrice) {
+        // A finite cheap shot remainder cannot satisfy all funded demand.
+        // Let other sellers meet the rest at the floor instead of requiring
+        // an impossible undercut. Unlimited NPC stock remains a hard cap.
+        const market = decision?.market;
+        if (String(item.kind || '').startsWith('Other.Shot')
+            && decision.reason === 'active_demand'
+            && Number(market?.demand?.unitPrice) >= minimum
+            && Number(market?.demand?.fundedUnits) > Number(market?.supply?.units || 0)
+            && minimum < BotMarketPricing.npcPrice(item)) return minimum;
+        return null;
+    }
     return Math.max(minimum, Math.min(preferred, competitivePrice));
 }
 

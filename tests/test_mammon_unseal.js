@@ -20,7 +20,7 @@ World.user = {sessions:[]};
 invoke('GameServer/Actor/Generics').calculateStats = () => {};
 invoke('GameServer/Skills/ToggleSkills').syncEquipment = () => {};
 invoke('GameServer/Network/Response').charInfo = () => Buffer.alloc(0);
-invoke('GameServer/Inventory/ShotStock').ensureActorStock = async () => ({});
+invoke('GameServer/Inventory/ShotStock').purchaseActorRestock = async () => ({});
 invoke('GameServer/Inventory/ShotStock').enableAutoShot = () => {};
 invoke('GameServer/Bot/AI/BotEventJournal').record = async () => {};
 async function run() {

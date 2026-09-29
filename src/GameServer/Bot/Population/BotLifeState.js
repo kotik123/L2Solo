@@ -385,27 +385,6 @@ function syncInventorySummary(characterId, inventory) {
     return Database.syncInventorySummary(characterId, inventory);
 }
 
-function removeOneRecipeCopy(item) {
-    const amount = Math.max(0, Number(item?.amount || 0) - 1);
-    const next = { ...(item || {}), amount };
-    if (!Array.isArray(item?.instances)) return next;
-
-    const instances = item.instances.slice(1);
-    const equippedSlots = [...new Set(instances
-        .filter((instance) => instance?.equipped && Number(instance.slot) > 0)
-        .map((instance) => Number(instance.slot)))].sort((left, right) => left - right);
-    return {
-        ...next,
-        instances,
-        equipped: equippedSlots.length > 0,
-        equippedCount: equippedSlots.length,
-        equippedSlots,
-        enchant: instances.length && new Set(instances.map((instance) => Number(instance.enchant || 0))).size === 1
-            ? Number(instances[0].enchant || 0)
-            : null
-    };
-}
-
 function targetCombatTelemetry(previous = {}, debug = {}, timestamp = now()) {
     const targetNpcId = Number(debug?.targetNpcId || 0);
     if (targetNpcId <= 0) return null;
@@ -2404,6 +2383,29 @@ const BotLifeState = {
             };
         }
 
+        // Cold combat spends the same persisted shot stock that hot combat uses.
+        // Resolve telemetry is already available here, so this adds no market
+        // lookup or extra inventory query to the simulation tick.
+        // Aggregate actions include enemy turns and, for parties, other members.
+        const shotActions = Math.max(0, Number(result.debug?.shotActions || 0));
+        if (shotActions > 0) {
+            const shot = invoke('GameServer/Inventory/ShotStock').planForRows(
+                Object.values(inventory).map((item) => ({ ...item,
+                    equipped: item.equipped === true || Number(item.equippedCount || 0) > 0
+                })), Number(state.stats?.classId || state.classId || 0));
+            const weapon = Object.values(inventory).find((item) =>
+                item.equipped && [7, 14].includes(Number(item.slot || 0)));
+            const weaponTemplate = weapon ? itemTemplate(weapon.selfId) : null;
+            const perAction = Math.max(1, Number(weaponTemplate?.etc?.[
+                shot.kind === 'spiritshot' ? 'spiritshot' : 'soulshot'
+            ] || 1));
+            const stock = inventory[String(shot.selfId)];
+            if (stock && Number(stock.amount || 0) > 0) {
+                inventory[String(shot.selfId)] = { ...stock,
+                    amount: Math.max(0, Number(stock.amount) - Math.ceil(shotActions) * perAction) };
+            }
+        }
+
         const equippedInventory = GearAcquisitionPlanner.equipInventoryUpgrades({
             ...state,
             level,
@@ -3009,7 +3011,7 @@ const BotLifeState = {
         });
     },
 
-    syncExternalInventory(characterId, reason = 'external_inventory_sync', previousState = null) {
+    syncExternalInventory(characterId, reason = 'external_inventory_sync', previousState = null, options = {}) {
         const id = Number(characterId);
         const state = previousState || cache.get(id);
         if (!id || !state) return Promise.resolve(null);
@@ -3025,7 +3027,7 @@ const BotLifeState = {
                 },
                 updatedAt: now()
             };
-            const fromAfkTrade = String(reason).startsWith('afk_trade_');
+            const fromAfkTrade = options.autoEquip !== false && String(reason).startsWith('afk_trade_');
             const reconciled = fromAfkTrade ? reconcileEquipmentInventory(refreshed) : refreshed;
             const equipmentChanged = fromAfkTrade && JSON.stringify(refreshed.stats.equipment)
                 !== JSON.stringify(reconciled.stats.equipment);
@@ -3401,44 +3403,19 @@ const BotLifeState = {
             .sort((left, right) => Number(left.selfId || 0) - Number(right.selfId || 0));
         if (!candidates.length) return Promise.resolve(state);
 
-        return Database.fetchCharacterRecipes(state.characterId).then((rows) => {
-            const known = new Set((rows || []).map((row) => Number(row.recipeId)));
-            const inventory = { ...(state.inventory || {}) };
-            const learned = [];
-
-            return candidates.reduce((chain, item) => chain.then(async () => {
+        return Database.fetchCharacterRecipes(state.characterId).then(async rows => {
+            const known = new Set((rows || []).map(row => Number(row.recipeId)));
+            const recipes = candidates.filter(item => Number(item.amount || 0) > 0).flatMap(item => {
                 const decision = ItemDisposition.recipeDisposition(state, item, [...known]);
-                if (decision?.action !== 'learn') return;
-                try {
-                    await Database.setCharacterRecipe(state.characterId, decision.recipe.recipeId, decision.recipe.type);
-                } catch (error) {
-                    utils.infoWarn('BotLife', 'failed to learn recipe %d for %s: %s', decision.recipe.recipeId, state.name, error.message || error);
-                    return;
-                }
-                known.add(Number(decision.recipe.recipeId));
-                inventory[String(item.selfId)] = removeOneRecipeCopy(item);
-                learned.push({
-                    recipeId: Number(decision.recipe.recipeId),
-                    recipeItemId: Number(decision.recipe.recipeItemId),
-                    name: item.name || `Recipe ${decision.recipe.recipeId}`
-                });
-            }), Promise.resolve()).then(() => {
-                if (!learned.length) return state;
-                const nextState = {
-                    ...state,
-                    inventory,
-                    stats: {
-                        ...(state.stats || {}),
-                        lastRecipeBookLearning: { learned, at: now() }
-                    },
-                    updatedAt: now()
-                };
-                return this.upsertState(nextState, 'recipe_book_learned').then((saved) => {
-                    const persisted = saved || nextState;
-                    return syncInventorySummary(persisted.characterId, persisted.inventory).then(() => persisted);
-                });
+                return decision?.action === 'learn' ? [{ ...decision.recipe, name: item.name }] : [];
             });
-        }).catch((error) => {
+            if (!recipes.length) return state;
+            const learned = await Database.learnColdRecipes(state.characterId, recipes, state);
+            if (!learned.coldLifeRow) return state;
+            const saved = this.acceptLifecycleRow(learned.coldLifeRow);
+            notifyColdSnapshot(saved, 'recipe_book_learned', { critical: true });
+            return saved;
+        }).catch(error => {
             utils.infoWarn('BotLife', 'failed recipe-book reconciliation for %s: %s', state.name, error.message || error);
             return state;
         });

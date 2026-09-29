@@ -119,8 +119,8 @@ class ClanPlanningCoordinator {
 
 let coordinator = null;
 let enabled = false;
-let staticMarket = null;
-let staticMarketBuild = null;
+const staticMarkets = new Map();
+const staticMarketBuilds = new Map();
 
 function offerRow(offer) {
     // Live sessions, actors and mutable store entries never cross the boundary.
@@ -134,17 +134,18 @@ async function context() {
     const craft = invoke('GameServer/Bot/Economy/CraftShopService');
     const shops = invoke('GameServer/World/Generics/NpcShopBuyLists');
     const items = (cache.items || []).filter((item) => Number(item.etc?.slot) > 0);
-    if (!staticMarket) {
-        staticMarketBuild ||= (async () => {
+    const rate = invoke('GameServer/ProgressionRates').profile().multiplier;
+    if (!staticMarkets.has(rate)) {
+        if (!staticMarketBuilds.has(rate)) staticMarketBuilds.set(rate, (async () => {
             const npcOffers = [];
             for (let i = 0; i < items.length; i++) {
                 npcOffers.push(...market.npcOffersAll(items[i].selfId).map(offerRow));
                 if (i % 8 === 7) await yieldLoop();
             }
             return { npcOffers, towns: market.TOWN_NPC_SELLERS, shopEntries: shops.allEntries().map(({ selfId }) => ({ selfId })) };
-        })();
-        try { staticMarket = await staticMarketBuild; }
-        finally { staticMarketBuild = null; }
+        })());
+        try { staticMarkets.set(rate, await staticMarketBuilds.get(rate)); }
+        finally { staticMarketBuilds.delete(rate); }
     }
     const offers = [];
     for (let i = 0; i < items.length; i++) {
@@ -158,7 +159,7 @@ async function context() {
     for (const key of ['progressionPreset', 'expRate', 'spRate', 'adenaRate', 'dropChanceRate', 'spoilRate']) {
         general[key] = global.options.default.General?.[key];
     }
-    return { ...staticMarket, offers, recipes, general, progressionRate: process.env.L2NODE_PROGRESSION_RATE };
+    return { ...staticMarkets.get(rate), offers, recipes, general, progressionRate: process.env.L2NODE_PROGRESSION_RATE };
 }
 
 module.exports = {

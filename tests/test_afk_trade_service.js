@@ -170,6 +170,8 @@ function sessionFor(accountId, row, items) {
     assert.strictEqual(customer.actor.backpack.fetchTotalAdena(), 89);
     assert.strictEqual(owner.actor.backpack.fetchTotalAdena(), 111);
     assert.strictEqual(AfkTrade.findProjection(projectionId).actor.fetchPrivateStore().items[0].count, 2);
+    assert.strictEqual(AfkTrade.findProjection(projectionId).actor.fetchPrivateStore().title, 'AFK materials',
+        'player-authored shop titles must remain untouched');
     assert.strictEqual((await Database.fetchAfkTradeNotifications(ownerId)).length, 0, 'online owner notification must be marked delivered');
 
     await AfkTrade.stop(owner);
@@ -231,6 +233,71 @@ function sessionFor(accountId, row, items) {
     assert.strictEqual((await Database.fetchAfkTradeShops(ownerId))[0].lines.length, 6);
     assert.strictEqual(AfkTrade.findOwnerProjection(ownerId).actor.fetchPrivateStore().items.length, 6);
     await AfkTrade.stop(owner);
+
+    await Database.createAccount('bot_title_owner', 'pw');
+    const botId = Number((await Database.createCharacter('bot_title_owner', character('TitleOwner'))).insertId);
+    const titleRows = [];
+    for (const [selfId, name, count] of [[1804, 'Alpha', 3], [1805, 'Beta', 2]]) {
+        const objectId = Number((await Database.setItem(botId, { selfId, name, amount: count })).insertId);
+        titleRows.push({ objectId, selfId, name, count, price: 1, stackable: true });
+    }
+    await Database.setItem(botId, { selfId: 57, name: 'Adena', amount: 100 });
+    const placement = { town: 'Giran', locX: 83000, locY: 148000, locZ: -3400,
+        appearance: { model: { ...character('TitleOwner'), title: '' } } };
+    await AfkTrade.publishBot(botId, { ...placement, storeType: AfkTrade.SELL,
+        title: 'Alpha x3, Beta x2', lines: titleRows });
+    const titleProjection = AfkTrade.findOwnerProjection(botId);
+    const Response = invoke('GameServer/Network/Response');
+    customer.sent.length = 0;
+    await AfkTrade.repriceBot(botId, titleProjection.shop.lines[0].id, 1);
+    assert(!customer.sent.some(packet => packet[0] === Response.privateStoreMsg(titleProjection.actor, '').at(0)),
+        'an unchanged title must not produce an extra title packet');
+    await AfkTrade.buyFromShop(customerId, titleProjection.actor.fetchPrivateStore(), 1804, 1);
+    assert.strictEqual(titleProjection.shop.title, 'Alpha x2, Beta x2');
+    assert(customer.sent.some(packet => packet.equals(Response.privateStoreMsg(titleProjection.actor, 'Alpha x2, Beta x2'))),
+        'a nearby viewer must receive the changed native sell title');
+    await AfkTrade.buyFromShop(customerId, titleProjection.actor.fetchPrivateStore(), 1804, 2);
+    assert.strictEqual(titleProjection.shop.title, 'Beta x2', 'sold-out first item must disappear from the title');
+    assert.strictEqual((await Database.fetchAfkTradeShops(botId))[0].title, 'Beta x2', 'new title must be durable');
+    await Database.execute(["UPDATE afk_trade_shops SET title = 'Stale sold-out item' WHERE ownerId = ? AND status = 'active'", [botId]]);
+    await AfkTrade.repriceBot(botId, titleProjection.shop.lines.find(line => line.count > 0).id, 1);
+    assert.strictEqual((await Database.fetchAfkTradeShops(botId))[0].title, 'Beta x2',
+        'an unchanged reprice repairs legacy stale titles without changing stock');
+    const betaLine = titleProjection.shop.lines.find(line => line.selfId === 1805);
+    await AfkTrade.repriceBot(botId, betaLine.id, 1, null, 1);
+    assert.strictEqual(titleProjection.shop.title, 'Beta', 'reducing listed quantity must refresh its title too');
+    await AfkTrade.stop(botId);
+    await AfkTrade.publishBot(botId, { ...placement, storeType: AfkTrade.BUY,
+        title: 'WTB Alpha x2, Beta x2', lines: titleRows.map(line => ({ ...line, count: 2 })) });
+    const titleBuyer = AfkTrade.findOwnerProjection(botId);
+    customer.sent.length = 0;
+    await AfkTrade.sellToShop(customerId, titleBuyer.actor.fetchPrivateStore(), 1804, 2,
+        { objectId: customer.actor.backpack.fetchItemFromSelfId(1804).fetchId() });
+    assert.strictEqual(titleBuyer.shop.title, 'WTB Beta x2', 'filled buy request must disappear from the title');
+    assert(customer.sent.some(packet => packet.equals(Response.privateStoreBuyMsg(titleBuyer.actor, 'WTB Beta x2'))),
+        'a nearby viewer must receive the changed native buy title');
+    await AfkTrade.stop(botId);
+    const shotObject = Number((await Database.setItem(botId, { selfId: 1464, name: 'Soulshot: C-grade', amount: 1000 })).insertId);
+    await Database.execute(['UPDATE items SET amount = amount + 10000 WHERE characterId = ? AND selfId = 57', [customerId]]);
+    await AfkTrade.publishBot(botId, { ...placement, storeType: AfkTrade.SELL,
+        title: 'Soulshot: C-grade x1000', lines: [{ objectId: shotObject, selfId: 1464,
+            name: 'Soulshot: C-grade', count: 1000, price: 1, stackable: true }] });
+    await AfkTrade.buyFromShop(customerId, AfkTrade.findOwnerProjection(botId).actor.fetchPrivateStore(), 1464, 501);
+    assert(!AfkTrade.findOwnerProjection(botId), 'a residual shot lot below 500 must leave the market');
+    assert.strictEqual((await Database.fetchItems(botId)).filter(row => row.selfId === 1464)
+        .reduce((sum, row) => sum + row.amount, 0), 499, 'the small remainder is returned intact to its owner');
+    await Database.createAccount('bot_shot_order', 'pw');
+    const orderOwner = Number((await Database.createCharacter('bot_shot_order', character('ShotOrder'))).insertId);
+    await Database.setItem(orderOwner, { selfId: 57, name: 'Adena', amount: 1000 });
+    const matchObject = Number((await Database.setItem(botId, { selfId: 1463, name: 'Soulshot: D-grade', amount: 1000 })).insertId);
+    await AfkTrade.publishBot(botId, { ...placement, storeType: AfkTrade.SELL, title: 'D shots',
+        lines: [{ objectId: matchObject, selfId: 1463, name: 'Soulshot: D-grade', count: 1000, price: 1, stackable: true }] });
+    await AfkTrade.publishBot(orderOwner, { ...placement, storeType: AfkTrade.BUY, title: 'WTB shots',
+        lines: [{ selfId: 1463, name: 'Soulshot: D-grade', count: 501, price: 1, stackable: true }] });
+    assert.strictEqual((await AfkTrade.matchAfkOrders(orderOwner)).trades.length, 1);
+    assert(!AfkTrade.findOwnerProjection(botId), 'automatic order matching must also remove small shot remainders');
+    assert.strictEqual((await Database.fetchItems(botId)).filter(row => row.selfId === 1463)
+        .reduce((sum, row) => sum + row.amount, 0), 499);
     await AfkTrade._resetForTests();
     await Database.close();
     clean();

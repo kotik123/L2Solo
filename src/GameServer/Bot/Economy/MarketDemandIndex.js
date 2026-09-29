@@ -10,27 +10,37 @@ function timestampForWanted(wanted = {}) {
 function demandSignal(state, selfId, timestamp) {
     if (!state || Number(state.characterId || 0) <= 0) return null;
     const wanted = state.stats?.marketWanted;
+    const shotWanted = state.stats?.shotDemand;
+    const recipeWanted = state.stats?.shotRecipeDemand;
     const plan = state.stats?.equipmentPlan;
     const wantedAt = timestampForWanted(wanted);
     const recentWanted = Number(wanted?.itemId || 0) === Number(selfId)
         && wantedAt > 0
         && wantedAt + WANTED_TTL_MS > timestamp;
+    const recentShot = Number(shotWanted?.itemId || 0) === Number(selfId)
+        && Number(shotWanted?.at || 0) + WANTED_TTL_MS > timestamp;
+    const recentRecipe = Number(recipeWanted?.itemId || 0) === Number(selfId)
+        && Number(recipeWanted?.at || 0) + WANTED_TTL_MS > timestamp;
     const activeTarget = plan?.status === 'active'
         && Number(plan.target?.selfId || 0) === Number(selfId);
     const material = ['active', 'component_ready', 'ready_to_craft'].includes(plan?.status)
         ? (plan.materials || []).find((item) => Number(item.selfId) === Number(selfId) && Number(item.missing || 0) > 0)
         : null;
 
-    if (!recentWanted && !activeTarget && !material) return null;
-    const ready = recentWanted || (activeTarget && plan.strategy === 'market') || Boolean(material?.marketFallback);
+    if (!recentWanted && !recentShot && !recentRecipe && !activeTarget && !material) return null;
+    const ready = recentWanted || recentShot || recentRecipe
+        || (activeTarget && plan.strategy === 'market') || Boolean(material?.marketFallback);
+    const economicWanted = recentShot ? shotWanted : recentRecipe ? recipeWanted : null;
     return {
         characterId: Number(state.characterId),
         name: state.name || null,
         town: state.currentRegion || null,
-        amount: Math.max(1, Number(material?.missing || 1)),
-        budget: Math.max(0, Number(state.adena || 0)),
+        amount: Math.max(1, Number(economicWanted?.amount || (recentWanted ? wanted?.amount : material?.missing) || 1)),
+        budget: Math.max(0, Math.min(Number(state.adena || 0), economicWanted?.maxSpend === undefined
+            ? Infinity : Number(economicWanted.maxSpend))),
         ready,
-        source: recentWanted ? 'wanted' : material ? 'craft' : plan.strategy === 'market' ? 'market_plan' : 'progression_plan'
+        source: recentShot ? 'shots' : recentRecipe ? 'shot_recipe' : recentWanted ? 'wanted'
+            : material ? 'craft' : plan.strategy === 'market' ? 'market_plan' : 'progression_plan'
     };
 }
 
@@ -44,6 +54,8 @@ function indexSignals(allStates, timestamp = Date.now()) {
         const plan = state?.stats?.equipmentPlan;
         const ids = new Set([
             Number(state?.stats?.marketWanted?.itemId || 0),
+            Number(state?.stats?.shotDemand?.itemId || 0),
+            Number(state?.stats?.shotRecipeDemand?.itemId || 0),
             Number(plan?.target?.selfId || 0),
             ...(plan?.materials || []).map((material) => Number(material?.selfId || 0))
         ]);

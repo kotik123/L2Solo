@@ -355,6 +355,7 @@ const BackgroundPartyResolver = {
         const defeatedNpcIds = [];
         let avoidedReason = null;
         const combatHelp = new Map();
+        const memberShotActions = new Map();
         let combatMembers = members.map((state) => ({
             ...state,
             vitals: pending ? { ...state.vitals } : BackgroundResolver.applyStandingRegen(state, state.vitals, elapsedMs, timestamp)
@@ -387,6 +388,10 @@ const BackgroundPartyResolver = {
             summonUses += Number(encounter.debug?.summonUses || 0);
             summonActions += Number(encounter.debug?.summonActions || 0);
             potionsUsed += Number(encounter.debug?.potionsUsed || 0);
+            for (const member of encounter.members) {
+                const id = Number(member.state.characterId);
+                memberShotActions.set(id, (memberShotActions.get(id) || 0) + Number(member.shotActions || 0));
+            }
             combatMembers = encounter.members.map((member) => ({
                 ...member.state,
                 vitals: { ...member.vitals },
@@ -507,6 +512,7 @@ const BackgroundPartyResolver = {
                         // state updates are persisted, so use the stable local
                         // result order to nominate exactly one aggregate owner.
                         populationTelemetryOwner: index === 0,
+                        shotActions: memberShotActions.get(Number(state.characterId)) || 0,
                         // The worker delivers member results, not the outer
                         // aggregate. Carry combat totals on this owner only.
                         ...(index === 0 ? { combatActions, skillUses, heals } : {})

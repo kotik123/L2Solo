@@ -41,4 +41,8 @@ function marketStoreTitle(items, limit = MAX_TITLE_LENGTH) {
     return truncate(title, limit);
 }
 
-module.exports = { MAX_TITLE_LENGTH, marketStoreTitle };
+function marketBuyStoreTitle(items) {
+    return `WTB ${marketStoreTitle(items, MAX_TITLE_LENGTH - 4)}`;
+}
+
+module.exports = { MAX_TITLE_LENGTH, marketStoreTitle, marketBuyStoreTitle };

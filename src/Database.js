@@ -1489,6 +1489,29 @@ function syncPlayerManagedClanUnsafe(clanId) {
     };
 }
 
+// Economic operations must commit their cold projection with the physical
+// inventory. A later failure or restart must not replay pre-purchase balances.
+function syncEconomySnapshotUnsafe(characterId, state, changedIds, mp = null) {
+    if (!state) return null;
+    const row = one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
+    if (!row || row.phase !== 'cold' || row.simulationOwner !== LEGACY_SIMULATION_OWNER
+        || (state.simulation && Number(row.simulationRevision) !== Number(state.simulation.revision))) {
+        throw new Error('economy_state_changed');
+    }
+    const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
+    const physical = LifeState.inventorySummaryFromItems(all('SELECT * FROM items WHERE characterId = ?', [Number(characterId)]));
+    const inventory = jsonObject(row.inventorySummary);
+    for (const id of new Set([57, ...changedIds].map(Number))) {
+        if (physical[id]) inventory[id] = physical[id];
+        else delete inventory[id];
+    }
+    const adena = Number(physical[57]?.amount || 0);
+    write(`UPDATE bot_life_state SET inventorySummary = ?, adena = ?, mp = COALESCE(?, mp),
+        simulationRevision = simulationRevision + 1, updatedAt = ? WHERE characterId = ?`,
+    [JSON.stringify(inventory), adena, mp, now(), Number(characterId)]);
+    return normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [Number(characterId)]));
+}
+
 function syncAdenaSnapshotUnsafe(characterId, amount, event = null) {
     const row = one('SELECT inventorySummary, statsJson FROM bot_life_state WHERE characterId = ?', [Number(characterId)]);
     if (!row) return false;
@@ -2099,10 +2122,23 @@ function returnAfkTradeEscrowUnsafe(shop, closedAt = now()) {
         WHERE id = ? AND status = 'active'`, [closedAt, closedAt, shop.id]);
 }
 
-function completeAfkTradeIfFilledUnsafe(shopId, timestamp) {
-    const remaining = Number(one(`SELECT COUNT(*) AS count FROM afk_trade_lines
+function completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned = false) {
+    const lines = botOwned ? all(`SELECT selfId, name, count FROM afk_trade_lines
+        WHERE shopId = ? AND count > 0 ORDER BY id`, [shopId]) : null;
+    const remaining = lines ? lines.length : Number(one(`SELECT COUNT(*) AS count FROM afk_trade_lines
         WHERE shopId = ? AND count > 0`, [shopId])?.count || 0);
-    if (remaining > 0) return false;
+    if (remaining > 0) {
+        if (lines) {
+            const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
+            const sellTitle = marketStoreTitle(lines), buyTitle = marketBuyStoreTitle(lines);
+            // Same trade transaction and existing revision: only this shop's few
+            // remaining lines are inspected, with no population/market scan.
+            write(`UPDATE afk_trade_shops SET title = CASE WHEN storeType = 3 THEN ? ELSE ? END
+                WHERE id = ? AND title != CASE WHEN storeType = 3 THEN ? ELSE ? END`,
+            [buyTitle, sellTitle, shopId, buyTitle, sellTitle]);
+        }
+        return false;
+    }
     write(`UPDATE afk_trade_shops
         SET status = 'filled', escrowAdena = 0, revision = revision + 1, updatedAt = ?, closedAt = ?
         WHERE id = ? AND status = 'active'`, [timestamp, timestamp, shopId]);
@@ -2665,6 +2701,8 @@ const Database = {
                 [unitPrice, count, timestamp, id]);
             write(`UPDATE afk_trade_shops SET escrowAdena = ?, revision = revision + 1,
                 updatedAt = ? WHERE id = ?`, [reserved, timestamp, shop.id]);
+            const owner = one('SELECT username FROM characters WHERE id = ?', [characterId]);
+            completeAfkTradeIfFilledUnsafe(shop.id, timestamp, String(owner?.username || '').startsWith('bot_'));
             return {
                 shop: afkTradeShopUnsafe(shop.id),
                 ownerInventory: afkTradeInventoryUnsafe(characterId)
@@ -2743,8 +2781,8 @@ const Database = {
                 quantity, sellLine.price, total, sellerShop.town,
                 sellerId, seller?.name || null, buyerId, buyer?.name || null
             ]);
-            completeAfkTradeIfFilledUnsafe(sellShopId, timestamp);
-            completeAfkTradeIfFilledUnsafe(buyShopId, timestamp);
+            completeAfkTradeIfFilledUnsafe(sellShopId, timestamp, botOwned);
+            completeAfkTradeIfFilledUnsafe(buyShopId, timestamp, botBuyer);
             return {
                 sellerEventId, buyerEventId, amount: quantity, totalPrice: total,
                 line: sellLine,
@@ -2797,7 +2835,7 @@ const Database = {
                 botOwned ? 'afk_bot_store' : 'afk_player_store', line.selfId, line.name, quantity, line.price, total,
                 shop.town, shop.ownerId, owner?.name || null, buyerId, buyer?.name || null
             ]);
-            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp);
+            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned);
             return {
                 eventId,
                 filled,
@@ -2863,7 +2901,7 @@ const Database = {
                 line.selfId, line.name, quantity, line.price, total,
                 shop.town, sellerId, seller?.name || null, shop.ownerId, owner?.name || null
             ]);
-            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp);
+            const filled = completeAfkTradeIfFilledUnsafe(shopId, timestamp, botOwned);
             return {
                 eventId,
                 filled,
@@ -4823,7 +4861,50 @@ const Database = {
     fetchCharacterRecipes(characterId) { return run('SELECT recipeId, type FROM character_recipes WHERE characterId = ?', [characterId], 'recipe:list'); },
     setCharacterRecipe(characterId, recipeId, type) { return run(UPSERT_RECIPE, [characterId, recipeId, type], 'recipe:upsert'); },
 
-    craftInventoryItems(characterId, { materials, product, mp }) {
+    learnColdRecipes(characterId, recipes, coldState) {
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const learned = [];
+            for (const recipe of recipes) {
+                if (one('SELECT recipeId FROM character_recipes WHERE characterId = ? AND recipeId = ?',
+                    [characterId, recipe.recipeId])) continue;
+                const scroll = one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? AND amount > 0 AND equipped = 0 ORDER BY id LIMIT 1',
+                    [characterId, recipe.recipeItemId]);
+                if (!scroll) throw new Error('recipe_scroll_missing');
+                if (Number(scroll.amount) === 1) write('DELETE FROM items WHERE id = ? AND characterId = ?', [scroll.id, characterId]);
+                else write('UPDATE items SET amount = amount - 1 WHERE id = ? AND characterId = ?', [scroll.id, characterId]);
+                write(UPSERT_RECIPE, [characterId, recipe.recipeId, recipe.type]);
+                learned.push({ recipeId: recipe.recipeId, recipeItemId: recipe.recipeItemId, name: recipe.name || '' });
+            }
+            if (!learned.length) return { learned, coldLifeRow: null };
+            syncEconomySnapshotUnsafe(characterId, coldState, learned.map(recipe => recipe.recipeItemId));
+            write("UPDATE bot_life_state SET statsJson = json_set(statsJson, '$.lastRecipeBookLearning', json(?)) WHERE characterId = ?",
+                [JSON.stringify({ learned, at: now() }), characterId]);
+            return { learned, coldLifeRow: normalizeRow(one('SELECT * FROM bot_life_state WHERE characterId = ?', [characterId])) };
+        }, 'recipe:cold-learn'));
+    },
+
+    purchaseNpcInventoryItem(characterId, { selfId, name, amount, unitPrice, stackable = true, slot = 0, coldState = null }) {
+        const count = Number(amount), price = Number(unitPrice), itemId = Number(selfId);
+        if (!Number.isSafeInteger(count) || count <= 0 || count > 10000
+            || !Number.isSafeInteger(price) || price <= 0
+            || !Number.isSafeInteger(itemId) || itemId <= 0
+            || !Number.isSafeInteger(count * price)) return Promise.reject(new Error('invalid npc purchase'));
+        return withCharacterFlush(characterId, () => inTransaction(() => {
+            const wallet = one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = 57 ORDER BY id LIMIT 1', [characterId]);
+            if (!wallet || Number(wallet.amount) < count * price) return { ok: false, reason: 'insufficient_adena' };
+            write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [Number(wallet.amount) - count * price, wallet.id, characterId]);
+            const existing = stackable ? one('SELECT id, amount FROM items WHERE characterId = ? AND selfId = ? ORDER BY id LIMIT 1', [characterId, itemId]) : null;
+            if (existing) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [Number(existing.amount) + count, existing.id, characterId]);
+            else for (let index = 0; index < (stackable ? 1 : count); index += 1) {
+                write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, ?, ?)',
+                    [itemId, name || `Item ${itemId}`, stackable ? count : 1, Number(slot) || 0, characterId]);
+            }
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [itemId]);
+            return { ok: true, spent: count * price, amount: count, ...(coldLifeRow ? { coldLifeRow } : {}) };
+        }, 'bot:npc-purchase'));
+    },
+
+    craftInventoryItems(characterId, { materials, product, mp, coldState = null }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const sources = [];
             for (const material of [...materials].sort((left, right) => Number(left.id) - Number(right.id))) {
@@ -4838,7 +4919,10 @@ const Database = {
             if (target) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [productAmount, productId, characterId]);
             else if (product) productId = write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, ?, ?)', [product.selfId, product.name || '', product.amount, product.slot || 0, characterId]).insertId;
             write('UPDATE characters SET mp = ? WHERE id = ?', [mp, characterId]);
-            return { sources, product: product ? { id: productId, amount: productAmount } : null };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState,
+                [...materials.map(item => item.selfId), ...(product ? [product.selfId] : [])], mp);
+            return { sources, product: product ? { id: productId, amount: productAmount } : null,
+                ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'craft:self'));
     },
 
@@ -4942,7 +5026,7 @@ const Database = {
         }, 'item:combine'));
     },
 
-    crystallizeInventoryItem(characterId, { sourceId, sourceSelfId, crystalId, crystalName, crystalAmount }) {
+    crystallizeInventoryItem(characterId, { sourceId, sourceSelfId, crystalId, crystalName, crystalAmount, coldState = null }) {
         return withCharacterFlush(characterId, () => inTransaction(() => {
             const source = one('SELECT id, selfId, amount, equipped FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             if (!source || Number(source.selfId) !== Number(sourceSelfId) || Number(source.amount) !== 1 || Number(source.equipped) !== 0) throw new Error('crystallize source changed');
@@ -4952,7 +5036,8 @@ const Database = {
             write('DELETE FROM items WHERE id = ? AND characterId = ?', [sourceId, characterId]);
             if (target) write('UPDATE items SET amount = ? WHERE id = ? AND characterId = ?', [amount, id, characterId]);
             else id = write('INSERT INTO items (selfId, name, amount, equipped, slot, characterId) VALUES (?, ?, ?, 0, 0, ?)', [crystalId, crystalName || '', crystalAmount, characterId]).insertId;
-            return { crystalId, id, amount };
+            const coldLifeRow = syncEconomySnapshotUnsafe(characterId, coldState, [sourceSelfId, crystalId]);
+            return { crystalId, id, amount, ...(coldLifeRow ? { coldLifeRow } : {}) };
         }, 'crystalize'));
     },
 

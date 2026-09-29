@@ -272,6 +272,7 @@ function companionTownErrand(session, bot, player, BotAI) {
 }
 
 function townNpcTarget(town, bot, selfId = 0) {
+    if (ShotStock.SHOT_IDS.includes(Number(selfId))) return ShotStock.restockTarget(bot, town.name);
     const from = { locX: bot.fetchLocX(), locY: bot.fetchLocY(), locZ: bot.fetchLocZ() };
     const role = TownServiceCatalog.ROLES.GENERIC_MERCHANT;
     return TownServiceCatalog.targetFor(role, town.name, {

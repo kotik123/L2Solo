@@ -2081,6 +2081,11 @@ try {
     const errandLeader = fakeActor(2000037, { locX: 83396, locY: 147904, locZ: -3404 });
     const errandLeaderSession = fakeSession('player_town_errand_party', errandLeader);
     const errandBot = fakeActor(2000038, { locX: 83436, locY: 147904, locZ: -3404 });
+    errandBot.backpack.fetchEquippedWeapon = () => ({ fetchRank: () => 'c' });
+    const shotSeller = fakeActor(2090038, { locX: 83600, locY: 148300, locZ: -3406 });
+    shotSeller.fetchName = () => 'Squeesh';
+    shotSeller.fetchPrivateStore = () => ({ storeType: 1, town: 'Giran',
+        items: [{ selfId: 1464, count: 999999, price: 150 }] });
     const errandSession = fakeSession('bot_town_errand_party', errandBot);
     errandSession.followPlayerSession = errandLeaderSession;
     errandSession.partyCompanion = true;
@@ -2091,7 +2096,7 @@ try {
         errandLines.push(text);
         return true;
     };
-    World.user = { sessions: [errandLeaderSession, errandSession] };
+    World.user = { sessions: [errandLeaderSession, errandSession, fakeSession('bot_shot_seller', shotSeller)] };
     FollowingState.tick(errandSession, errandBot, {}, {
         getClosestNewbieGuide: () => ({ locX: -84081, locY: 243227, locZ: -3723 }),
         getClosestTown: () => ({ name: 'Giran', x: 83396, y: 147904, z: -3404 }),
@@ -2101,6 +2106,8 @@ try {
     assert.strictEqual(errandSession.plan, 'shopping', 'companion with no shots should make a brief errand only after the party reaches town');
     assert.strictEqual(errandSession.companionShopping?.kind, 'restock_shots', 'town errand should describe the actual missing supply');
     assert.strictEqual(errandSession.shoppingTarget?.town, 'Giran', 'companion errand should stay in the player town');
+    assert.strictEqual(errandSession.shoppingTarget?.actorId, shotSeller.fetchId(),
+        'shot errands must target the actual static merchant instead of an ordinary NPC');
     assert(errandLines.some((line) => line.includes('returning') || line.includes('back to camp')), 'companion should announce its return before shopping');
     assert.strictEqual(errandBot.fetchPrivateStore?.(), undefined, 'companion errand must never create a private sale store');
 

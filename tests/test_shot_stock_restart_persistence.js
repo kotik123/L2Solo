@@ -76,6 +76,20 @@ async function main() {
     assert.strictEqual(Number(readyShots.amount), 2000,
         'the final bot actor input must retain the extra shots after startup reconciliation');
 
+    await Database.setItem(characterId, { selfId: 57, name: 'Adena', amount: 5000 });
+    const orePurchase = await Database.purchaseNpcInventoryItem(characterId, {
+        selfId: 1785, name: 'Soul Ore', amount: 3, unitPrice: 500
+    });
+    assert.strictEqual(orePurchase.ok, true);
+    const rejected = await Database.purchaseNpcInventoryItem(characterId, {
+        selfId: 1785, name: 'Soul Ore', amount: 8, unitPrice: 500
+    });
+    assert.deepStrictEqual(rejected, { ok: false, reason: 'insufficient_adena' });
+    const purchasedRows = await Database.fetchItems(characterId);
+    assert.strictEqual(Number(purchasedRows.find((row) => Number(row.selfId) === 57)?.amount), 3500);
+    assert.strictEqual(Number(purchasedRows.find((row) => Number(row.selfId) === 1785)?.amount), 3,
+        'the rejected purchase must neither spend Adena nor mint ore');
+
     console.log('Shot stock restart persistence checks passed');
 }
 

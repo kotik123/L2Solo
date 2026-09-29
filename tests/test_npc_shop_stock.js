@@ -42,18 +42,18 @@ for (let i = 0; i < rowCount; i++) {
     });
 }
 
-assert.strictEqual(rows.get(1835).amount, 0, 'NPC Soulshot stock should be unlimited in BuyList');
-assert.strictEqual(rows.get(2509).amount, 0, 'NPC Spiritshot stock should be unlimited in BuyList');
+assert(!rows.has(1835), 'ordinary NPC shops must not sell Soulshots');
+assert(!rows.has(2509), 'ordinary NPC shops must not sell Spiritshots');
 assert.strictEqual(rows.get(17).amount, 0, 'NPC arrow stock should be unlimited in BuyList');
 assert.strictEqual(rows.get(1060).amount, 0, 'NPC scroll stock should be unlimited in BuyList');
-assert.strictEqual(rows.get(1835).price, 8, 'NPC shop should preserve audited per-NPC prices');
+assert.strictEqual(session.activeNpcShop.prices.has(1835), false, 'removed shots must not leave a purchasable price');
 
 const shopSpiritshots = (npcId) => NpcShopBuyLists.fetchForNpc(npcId)
     .map((entry) => entry.selfId)
     .filter((selfId) => selfId >= 2509 && selfId <= 2514);
 
 for (const npcId of [7004, 7137, 7150, 7519, 7561, 7063, 7254, 7315, 7081, 7180, 7301, 7834, 7839, 8256, 8300]) {
-    assert.deepStrictEqual(shopSpiritshots(npcId), [2509], `ordinary NPC merchant ${npcId} must only retain its no-grade Spiritshot`);
+    assert.deepStrictEqual(shopSpiritshots(npcId), [], `ordinary NPC merchant ${npcId} must leave shot supply to crafters and static traders`);
 }
 
 const shotStores = [

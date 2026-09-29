@@ -6,7 +6,7 @@ const C4EnchantScrolls = invoke('GameServer/Items/C4EnchantScrolls');
 const CraftShopService = invoke('GameServer/Bot/Economy/CraftShopService');
 const ClanSimulationConfig = invoke('GameServer/Clan/ClanSimulationConfig');
 
-const SELLABLE_KINDS = ['Weapon.', 'Armor.', 'Other.Material'];
+const SELLABLE_KINDS = ['Weapon.', 'Armor.', 'Other.Material', 'Other.Shot'];
 const NPC_ONLY_KINDS = ['Other.Recipe', 'Other.Spellbook'];
 const NPC_LIQUIDATION_MAX_UNIT_PRICE = 1000;
 const WAREHOUSE_GEAR_MIN_BASE_PRICE = 1000;
@@ -16,6 +16,11 @@ const NPC_ONLY_CLEANUP_MIN_SLOTS = 3;
 const NPC_SURPLUS_GEAR_MIN_SLOTS = 6;
 const CLAN_PROGRESSION_ITEM_IDS = new Set([1419]);
 const GRADE_ORDER = Object.freeze({ none: 0, d: 1, c: 2, b: 3, a: 4, s: 5 });
+const SHOT_PRODUCT_RANK = Object.freeze({
+    1463: 'd', 1464: 'c', 1465: 'b', 1466: 'a', 1467: 's',
+    2510: 'd', 2511: 'c', 2512: 'b', 2513: 'a', 2514: 's',
+    3948: 'd', 3949: 'c', 3950: 'b', 3951: 'a', 3952: 's'
+});
 
 let templateIndexSource = null;
 let templateIndex = new Map();
@@ -32,6 +37,10 @@ function templateFor(selfId) {
 function priceFor(state, item, template) {
     const basePrice = Number(template?.template?.price || 0);
     if (basePrice <= 0) return 0;
+    const crafted = state?.stats?.shotCraft;
+    if (String(template?.template?.kind || '') === 'Other.Shot'
+        && Number(crafted?.productId) === Number(item.selfId)
+        && Number(crafted?.unitPrice || 0) > 0) return Number(crafted.unitPrice);
     const seed = (Number(state.characterId || 0) * 31) + (Number(item.selfId || 0) * 17);
     const percent = 70 + (Math.abs(seed) % 21);
     const adjustment = Math.max(50, Math.min(100, Number(state?.stats?.marketPricing?.[Number(item.selfId)]?.percent || 100)));
@@ -67,6 +76,13 @@ function recipeInfo(item) {
     return { recipe, product, productRank: product?.etc?.rank || 'none' };
 }
 
+function recipeProductRank(item) {
+    const info = recipeInfo(item);
+    if (!info) return 'none';
+    return String(info.product?.etc?.rank || SHOT_PRODUCT_RANK[Number(info.recipe.productId)] || 'none')
+        .toLowerCase();
+}
+
 function isRecipeItem(item, template = templateFor(item?.selfId)) {
     return !!recipeInfo(item)
         && (kindFor(item, template).startsWith('Other.Recipe')
@@ -98,8 +114,21 @@ function isBelowCGrade(item) {
     return !!info && gradeIndex(info.productRank) < gradeIndex('c');
 }
 
+function isShotRecipeItem(item) {
+    const info = recipeInfo(item);
+    return !!info && isRecipeItem(item)
+        && String(info.product?.template?.kind || '') === 'Other.Shot';
+}
+
+function isMarketRecipeItem(item) {
+    const info = recipeInfo(item);
+    return !!info && info.recipe.type === 'dwarven' && isRecipeItem(item)
+        && gradeIndex(recipeProductRank(item)) >= gradeIndex('d');
+}
+
 function isNpcOnlyItem(item, template = templateFor(item?.selfId)) {
     if (isEquipmentItem(item, template)) return false;
+    if (isMarketRecipeItem(item)) return false;
     const kind = kindFor(item, template);
     return NPC_ONLY_KINDS.some((prefix) => kind.startsWith(prefix))
         || isRecipeItem(item, template)
@@ -112,7 +141,8 @@ function isNpcOnlyItem(item, template = templateFor(item?.selfId)) {
 
 function canLearnRecipe(state, item) {
     const info = recipeInfo(item);
-    if (!info || info.recipe.type !== 'dwarven' || isBelowCGrade(item)) return false;
+    if (!info || info.recipe.type !== 'dwarven'
+        || gradeIndex(recipeProductRank(item)) < gradeIndex('d')) return false;
     const craftLevel = Number(state?.craftLevel ?? state?.stats?.dwarvenCraftLevel
         ?? CraftShopService.craftLevelFor(state) ?? 0);
     if (craftLevel <= 0) return false;
@@ -123,8 +153,10 @@ function recipeDisposition(state, item, knownRecipeIds = []) {
     const info = recipeInfo(item);
     if (!info || !isRecipeItem(item)) return null;
     const known = new Set((knownRecipeIds || []).map((value) => Number(value)));
-    if (!canLearnRecipe(state, item)) return { action: 'npc', reason: 'recipe_not_learnable' };
-    if (known.has(Number(info.recipe.recipeId))) return { action: 'npc', reason: 'recipe_already_known' };
+    if (!canLearnRecipe(state, item)) return isMarketRecipeItem(item)
+        ? { action: 'market', reason: 'recipe_not_learnable' }
+        : { action: 'npc', reason: 'recipe_not_learnable' };
+    if (known.has(Number(info.recipe.recipeId))) return { action: 'market', reason: 'recipe_already_known' };
     return { action: 'learn', reason: 'recipe_book', recipe: info.recipe };
 }
 
@@ -270,6 +302,7 @@ function reservedUpgradeAmounts(state) {
 }
 
 function reservedEquipmentAmounts(state) {
+    if (!state) return {};
     const craft = reservedCraftAmounts(state);
     const combination = reservedCombinationAmounts(state);
     const upgrades = reservedUpgradeAmounts(state);
@@ -334,6 +367,14 @@ function saleCandidates(state, options = {}) {
         ? Number.MAX_SAFE_INTEGER
         : Math.max(1, Math.min(20, Number(options.limit) || 8));
     const reserved = { ...reservedEquipmentAmounts(state), ...(options.reserved || {}) };
+    const ownShot = invoke('GameServer/Inventory/ShotStock').planForRows(
+        Object.values(state?.inventory || {}).map((item) => ({ ...item,
+            equipped: item.equipped === true || Number(item.equippedCount || 0) > 0
+        })), Number(state?.stats?.classId || state?.classId || 0));
+    if (Number(state?.inventory?.[String(ownShot.selfId)]?.amount || 0) > 0) {
+        reserved[ownShot.selfId] = Math.max(Number(reserved[ownShot.selfId] || 0),
+            invoke('GameServer/Inventory/ShotStock').DEFAULT_TARGET_AMOUNT);
+    }
     return Object.values(state?.inventory || {}).flatMap((item) => {
         const selfId = Number(item?.selfId || 0);
         if (ClanCrafting.clanIdFor(state) && (ClanCrafting.isResource(selfId)
@@ -349,7 +390,7 @@ function saleCandidates(state, options = {}) {
         const npcOnly = isNpcOnlyItem(item, template);
         if (options.onlyNpc === true && !npcOnly) return [];
         const clanProgression = isClanProgressionItem(item);
-        if (!npcOnly && !clanProgression
+        if (!npcOnly && !clanProgression && !isMarketRecipeItem(item)
             && !isEnchantScroll(item)
             && !SELLABLE_KINDS.some((prefix) => kind.startsWith(prefix))) return [];
 
@@ -374,7 +415,8 @@ function saleCandidates(state, options = {}) {
             selfId,
             name: item.name || template?.template?.name || `Item ${selfId}`,
             kind,
-            rank: item.rank || template?.etc?.rank || 'none',
+            rank: isMarketRecipeItem(item)
+                ? recipeProductRank(item) : item.rank || template?.etc?.rank || 'none',
             count: sellableCount,
             // A stack can mix enchant levels; do not advertise its highest
             // enchant as if every instance had it. Only mark comparability.
@@ -382,7 +424,13 @@ function saleCandidates(state, options = {}) {
             price,
             basePrice: base
         }];
-    }).sort((a, b) => b.price - a.price || a.selfId - b.selfId).slice(0, limit);
+    }).sort((a, b) => {
+        const recipePriority = options.recipeFirst
+            ? Number(isMarketRecipeItem(b)) - Number(isMarketRecipeItem(a)) : 0;
+        const craftedShotId = Number(state?.stats?.shotCraft?.productId || 0);
+        const craftedPriority = Number(b.selfId === craftedShotId) - Number(a.selfId === craftedShotId);
+        return craftedPriority || recipePriority || b.price - a.price || a.selfId - b.selfId;
+    }).slice(0, limit);
 }
 
 function npcLiquidationCandidates(state, options = {}) {
@@ -395,6 +443,7 @@ function npcLiquidationCandidates(state, options = {}) {
         unlimited: true,
         allowPreTradeCleanup: options.allowPreTradeCleanup === true
     }).filter((item) => {
+        if (isMarketRecipeItem(item)) return false;
         if (isClanProgressionItem(item)) return false;
         const gear = String(item.kind || '').startsWith('Weapon.') || String(item.kind || '').startsWith('Armor.');
         const lowGradeGear = gear && gradeIndex(item.rank) < gradeIndex('c');
@@ -466,6 +515,9 @@ module.exports = {
     isClanProgressionItem,
     isNpcOnlyItem,
     isRecipeItem,
+    recipeProductRank,
+    isMarketRecipeItem,
+    isShotRecipeItem,
     isSkillBookItem,
     inventoryCleanupNeed,
     inventorySlotCount,

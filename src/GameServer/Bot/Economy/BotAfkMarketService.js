@@ -11,13 +11,10 @@ const BuyStoreService = invoke('GameServer/Bot/Economy/ColdMarketBuyStoreService
 const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const MarketOpportunity = invoke('GameServer/Bot/Economy/MarketOpportunity');
 const BotEconomyPricing = invoke('GameServer/Bot/Economy/BotEconomyPricing');
-const ClanCraftingPolicy = invoke('GameServer/Clan/ClanCraftingPolicy');
-const { marketStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
+const LotPolicy = require('./MarketLotPolicy');
+const { marketStoreTitle, marketBuyStoreTitle } = invoke('GameServer/Bot/Economy/MarketStoreTitle');
 
 const MAX_LINES = 3;
-const MIN_RESOURCE_LOT_BASE_ADENA = 2000;
-const MIN_RESOURCE_LOT_COUNT = 5;
-const EXTRA_BULK_RESOURCE_IDS = new Set([1785, 2508, 3031]);
 const SHOP_REVIEW_MS = 5 * 60 * 1000;
 const reviewedInventory = new Map();
 const pending = new Map();
@@ -83,21 +80,12 @@ function appearance(row, items) {
     };
 }
 
-function isResource(line) {
-    const kind = line?.kind || ItemTemplateIndex.find(DataCache.items, line?.selfId)?.template?.kind || '';
-    return String(kind).startsWith('Other.Material');
-}
-
 function minimumResourceLotValue() {
-    return BotEconomyPricing.scalePrice(MIN_RESOURCE_LOT_BASE_ADENA);
+    return BotEconomyPricing.scalePrice(LotPolicy.MIN_BASE_VALUE);
 }
 
 function viableSellLine(line) {
-    if (!isResource(line)) return true;
-    if ((ClanCraftingPolicy.isResource(line.selfId) || EXTRA_BULK_RESOURCE_IDS.has(Number(line.selfId)))
-        && Number(line.count) < MIN_RESOURCE_LOT_COUNT) return false;
-    const value = Number(line.count) * Number(line.price);
-    return Number.isSafeInteger(value) && value >= minimumResourceLotValue();
+    return LotPolicy.viable(line);
 }
 
 async function publishPrunedSellShop(shop, kept, town = shop.town, loc = shop) {
@@ -161,32 +149,25 @@ function sellLines(state, stock, inventory) {
             petData: line.petData || null
         })) : [];
     const saleState = stateWithEscrow(state, stock);
-    const classified = ListingPolicy.evaluate(saleState);
-    const selected = new Set(classified.listings.map((item) => Number(item.selfId)));
-    const fallback = ItemDisposition.saleCandidates(saleState).filter((item) => {
-        if (selected.has(Number(item.selfId)) || ItemDisposition.isNpcOnlyItem(item)
-            || ListingPolicy.starterItemIds().has(Number(item.selfId))) return false;
-        const kind = String(item.kind || '');
-        return kind.startsWith('Other.Material');
-    });
-    const listings = [...classified.listings, ...fallback].map((item) => ({
-        ...item,
-        count: isResource(item)
-            ? Number(item.count) + existing.filter((line) => line.selfId === Number(item.selfId))
-                .reduce((sum, line) => sum + Number(line.count), 0)
-            : Number(item.count)
-    }));
+    const hasRecipe = Object.values(saleState.inventory || {}).some(ItemDisposition.isMarketRecipeItem);
+    const classified = ListingPolicy.evaluate(saleState, hasRecipe ? { recipeFirst: true } : {});
+    const listings = classified.listings;
+    const priorityMarketItems = new Set(classified.listings
+        .filter((item) => ItemDisposition.isMarketRecipeItem(item)
+            || String(item.kind || '').startsWith('Other.Shot'))
+        .map((item) => Number(item.selfId)));
     const remaining = new Map(listings.map((item) => [Number(item.selfId), Number(item.count)]));
     const next = [];
-    for (const line of existing) {
+    const keepExisting = (line) => {
+        if (next.length >= MAX_LINES) return;
         const available = Math.max(0, Number(remaining.get(line.selfId) || 0));
-        if (!available) continue;
+        if (!available) return;
         const count = Math.min(line.count, available);
         next.push({ ...line, count });
         remaining.set(line.selfId, available - count);
-    }
-    for (const listing of listings) {
-        if (next.length >= MAX_LINES) break;
+    };
+    const appendListing = (listing) => {
+        if (next.length >= MAX_LINES) return;
         const available = inventory.filter((row) => Number(row.selfId) === Number(listing.selfId)
             && !row.equipped && Number(row.amount) > 0);
         for (const row of available) {
@@ -215,7 +196,11 @@ function sellLines(state, stock, inventory) {
             remaining.set(Number(listing.selfId), Number(remaining.get(Number(listing.selfId))) - count);
             break;
         }
-    }
+    };
+    existing.filter((line) => priorityMarketItems.has(line.selfId)).forEach(keepExisting);
+    listings.filter((item) => priorityMarketItems.has(Number(item.selfId))).forEach(appendListing);
+    existing.filter((line) => !priorityMarketItems.has(line.selfId)).forEach(keepExisting);
+    listings.filter((item) => !priorityMarketItems.has(Number(item.selfId))).forEach(appendListing);
     return next.filter(viableSellLine).slice(0, MAX_LINES);
 }
 
@@ -254,7 +239,11 @@ function sameSellOrder(stock, lines) {
 async function reconcileOne(state, goal) {
     const ownerId = Number(state.characterId);
     const projection = AfkTrade.findOwnerProjection(ownerId);
-    const stock = projection?.shop || null;
+    let stock = projection?.shop || null;
+    if (stock && await repairStoreTitle(stock)) {
+        stock = AfkTrade.findOwnerProjection(ownerId)?.shop || null;
+        state = LifeState.snapshot(ownerId) || state;
+    }
     const persistentSellGoal = Number(stock?.storeType) === AfkTrade.SELL && !desiredSide(goal)
         ? { type: 'sell_inventory', status: 'active', plan: { expectedBenefit: 'market_sale_inventory' } }
         : goal;
@@ -306,7 +295,7 @@ async function reconcileOne(state, goal) {
     if (!loc) return { state, changed: false, reason: 'market_full' };
     const title = side === AfkTrade.SELL
         ? marketStoreTitle(lines)
-        : `WTB ${lines[0].name}`.slice(0, 28);
+        : marketBuyStoreTitle(lines);
     const shop = await AfkTrade.publishBot(ownerId, {
         storeType: side,
         title,
@@ -327,6 +316,17 @@ async function reconcileOne(state, goal) {
     return { state: saved, changed: true, shop };
 }
 
+async function repairStoreTitle(shop) {
+    if (!String(shop.ownerAccount || '').startsWith('bot_')) return false;
+    const lines = (shop.lines || []).filter(line => Number(line.count) > 0);
+    if (!lines.length) return false;
+    const title = Number(shop.storeType) === AfkTrade.BUY
+        ? marketBuyStoreTitle(lines) : marketStoreTitle(lines);
+    if (shop.title === title) return false;
+    await AfkTrade.repriceBot(shop.ownerId, lines[0].id, lines[0].price, shop.revision, null, { match: false });
+    return true;
+}
+
 async function migrateRestoredShops() {
     let moved = 0;
     let skipped = 0;
@@ -341,12 +341,15 @@ async function migrateRestoredShops() {
         const removed = lines.length - kept.length;
         const town = MarketTownPolicy.targetTownForItems(state, kept.length ? kept : lines);
         const relocate = town !== shop.town;
-        if (!relocate && !removed) continue;
         const loc = relocate
             ? ListingService.marketLocation({ name: town }, { state })
             : { locX: shop.locX, locY: shop.locY, locZ: shop.locZ };
         if (!loc && kept.length) { skipped++; continue; }
         try {
+            if (!relocate && !removed) {
+                await repairStoreTitle(shop);
+                continue;
+            }
             if (!kept.length) {
                 await publishPrunedSellShop(shop, kept);
                 closed++;

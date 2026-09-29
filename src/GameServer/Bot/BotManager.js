@@ -593,11 +593,7 @@ const BotManager = {
                     const reconciledCharacter = reconciledCharacters[0];
                     if (!reconciledCharacter) return null;
                     if (botData.prepareOnly) return reconciledCharacters;
-                    return ShotStock.ensureCharacterStock(reconciledCharacter.id, {
-                        classId: reconciledCharacter.classId,
-                        targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT
-                    })
-                        .then(() => Shared.fetchCharacters(username));
+                    return reconciledCharacters;
                 });
 
             return spawnReady.then((readyCharacters) => {

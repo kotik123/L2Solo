@@ -94,8 +94,9 @@ async function parityAndIntegration() {
         try {
             process.env.L2NODE_PROGRESSION_RATE = 'x10';
             const member = { characterId: 990002, level: 40, classId: 4, phase: 'cold', stats: { classId: 4 }, inventory: {} };
+            const rateContext = await Runtime.context();
             const result = await worker.plan({ member, spots: [], warehouseRows: [], options: {},
-                context: { ...context, progressionRate: 'x10' } }, DataCache);
+                context: { ...rateContext, progressionRate: 'x10' } }, DataCache);
             assert.deepEqual(result, planForMember(member), 'resolved runtime rates must be refreshed in an already running worker');
         } finally {
             if (oldRate === undefined) delete process.env.L2NODE_PROGRESSION_RATE;

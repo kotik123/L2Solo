@@ -289,6 +289,7 @@ function refreshProjection(shop) {
     if (!projection) return spawnProjection(shop);
     const actor = projection.actor;
     const store = projectionStore(shop);
+    const titleChanged = actor.fetchPrivateStore()?.title !== store.title;
     invalidateTradeWindows(actor);
     unindexProjection(projection);
     projection.shop = shop;
@@ -313,6 +314,14 @@ function refreshProjection(shop) {
         }));
     }
     indexProjection(projection);
+    if (titleChanged) {
+        const packet = store.storeType === BUY
+            ? ServerResponse.privateStoreBuyMsg(actor, store.title)
+            : ServerResponse.privateStoreMsg(actor, store.title);
+        for (const viewer of World.user?.sessions || []) {
+            if (viewer.knownAfkTradeIds?.has(actor.fetchId()) && visibleTo(viewer, actor)) viewer.dataSendToMe(packet);
+        }
+    }
     return projection;
 }
 
@@ -392,14 +401,15 @@ async function notifyCommitted(result, kind) {
     await Database.markAfkTradeNotificationsDelivered(ownerId, [result.eventId]);
 }
 
-async function syncColdCharacter(characterId, previousState, reason, rows = []) {
+async function syncColdCharacter(characterId, previousState, reason, rows = [], options = {}) {
     if (!previousState) return null;
     try {
         const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
         const synced = await LifeState.syncExternalInventory(
             Number(characterId),
             reason,
-            previousState
+            previousState,
+            { autoEquip: options.autoEquip }
         );
         if (synced) return synced;
         const inventory = LifeState.inventorySummaryFromItems(rows);
@@ -424,7 +434,7 @@ async function syncColdCharacter(characterId, previousState, reason, rows = []) 
     }
 }
 
-async function finalizeTrade(result, kind, counterpartyId, previousState = null) {
+async function finalizeTrade(result, kind, counterpartyId, previousState = null, options = {}) {
     syncOnlineInventory(result.shop.ownerId, result.ownerInventory);
     syncOnlineInventory(counterpartyId, result.counterpartyInventory);
     if (String(result.shop?.ownerAccount || '').startsWith('bot_')) {
@@ -436,7 +446,8 @@ async function finalizeTrade(result, kind, counterpartyId, previousState = null)
         counterpartyId,
         previousState,
         `afk_trade_${kind}`,
-        result.counterpartyInventory
+        result.counterpartyInventory,
+        options
     );
     refreshProjection(result.shop);
     await notifyCommitted(result, kind);
@@ -494,7 +505,7 @@ async function relocateBot(ownerId, town, loc) {
     return shop;
 }
 
-async function repriceBot(ownerId, lineId, price, expectedRevision = null, quantity = null) {
+async function repriceBot(ownerId, lineId, price, expectedRevision = null, quantity = null, options = {}) {
     const current = findOwnerProjection(ownerId);
     if (!current?.actor?.fetchPrivateStore?.()?.botOwned) throw new Error('bot_afk_trade_unavailable');
     const result = await Database.repriceAfkTradeShop(ownerId, lineId, price, expectedRevision, quantity);
@@ -504,7 +515,7 @@ async function repriceBot(ownerId, lineId, price, expectedRevision = null, quant
     invoke('GameServer/Bot/Economy/BotAfkMarketService').rememberInventory(ownerId,
         invoke('GameServer/Bot/Population/BotLifeState').snapshot(ownerId));
     refreshProjection(result.shop);
-    await matchAfkOrders(ownerId);
+    if (options.match !== false) await matchAfkOrders(ownerId);
     return findOwnerProjection(ownerId)?.shop || null;
 }
 
@@ -562,6 +573,12 @@ async function matchAfkOrders(ownerId, maxTrades = 64) {
         await notifyCommitted({ shop: trade.buyerShop, eventId: trade.buyerEventId,
             line: trade.line, amount: trade.amount, totalPrice: trade.totalPrice }, 'purchase');
         trades.push(trade);
+        const lotPolicy = invoke('GameServer/Bot/Economy/MarketLotPolicy');
+        if (trade.sellerShop.ownerAccount?.startsWith('bot_')
+            && trade.sellerShop.lines.some(line => Number(line.count) > 0
+                && lotPolicy.shot(line) && !lotPolicy.viable(line))) {
+            await invoke('GameServer/Bot/Economy/BotAfkMarketService').pruneResourceLots(trade.sellerShop.ownerId);
+        }
     }
     if (trades.length >= batchLimit && !pendingMatchContinuations.has(Number(ownerId))) {
         const owner = Number(ownerId);
@@ -701,7 +718,7 @@ async function buyFromShop(characterId, store, selfId, amount, options = {}) {
         expectedPrice: options.expectedPrice ?? line.price,
         expectedRevision: options.expectedRevision
     });
-    return finalizeTrade(result, 'sale', characterId, options.coldState);
+    return finalizeTrade(result, 'sale', characterId, options.coldState, options);
 }
 
 async function sellToShop(characterId, store, selfId, amount, options = {}) {

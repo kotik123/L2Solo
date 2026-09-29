@@ -7,18 +7,23 @@ const Database = invoke('Database');
 const LifeState = invoke('GameServer/Bot/Population/BotLifeState');
 const ItemDisposition = invoke('GameServer/Bot/Economy/ItemDisposition');
 const MarketListingPolicy = invoke('GameServer/Bot/Economy/MarketListingPolicy');
+const MarketTownPolicy = invoke('GameServer/Bot/Economy/MarketTownPolicy');
 const C4RecipeItems = invoke('GameServer/Items/C4RecipeItems');
 
 DataCache.init();
 
 const recipe = C4RecipeItems.resolve(2298);
+const dRecipe = C4RecipeItems.resolve(2153);
 const lowGradeRecipe = C4RecipeItems.resolve(2250);
 const spellbook = DataCache.items.find((item) => item?.template?.kind === 'Other.Spellbook');
-assert(recipe && lowGradeRecipe && spellbook, 'the datapack must contain recipe and spellbook fixtures');
+assert(recipe && dRecipe && lowGradeRecipe && spellbook,
+    'the datapack must contain recipe and spellbook fixtures');
 
 const original = {
     fetchCharacterRecipes: Database.fetchCharacterRecipes,
     setCharacterRecipe: Database.setCharacterRecipe,
+    learnColdRecipes: Database.learnColdRecipes,
+    acceptLifecycleRow: LifeState.acceptLifecycleRow,
     syncInventorySummary: Database.syncInventorySummary,
     upsertState: LifeState.upsertState
 };
@@ -43,9 +48,25 @@ async function run() {
     );
     assert.strictEqual(
         ItemDisposition.recipeDisposition(craftState, craftState.inventory[2298], [recipe.recipeId]).action,
-        'npc',
-        'a recipe already present in the book must go to the NPC shop'
+        'market',
+        'a duplicate C-grade recipe remains available for another crafter'
     );
+    const dRecipeItem = { selfId: 2153, name: "Recipe: Tiger's Eye Earring",
+        amount: 1, kind: 'Other.Recipe' };
+    assert.strictEqual(ItemDisposition.isNpcOnlyItem(dRecipeItem), false,
+        'D-grade equipment recipes must be marketable');
+    const dMarketItem = ItemDisposition.saleCandidates({ ...craftState, classId: 28,
+        stats: { classId: 28 }, inventory: { 2153: dRecipeItem } },
+    { unlimited: true }).find((item) => item.selfId === 2153);
+    assert(dMarketItem, 'a non-crafter should sell a D-grade recipe');
+    assert.strictEqual(dMarketItem.rank, 'd', 'recipe market grade follows its product');
+    assert.strictEqual(MarketTownPolicy.targetTownForItems(craftState, [dMarketItem]),
+        MarketTownPolicy.dGradeMarketFor(craftState));
+    assert.strictEqual(MarketTownPolicy.targetTownForItems(craftState, [{ ...dMarketItem, selfId: 2298,
+        rank: 'c' }]), 'Giran');
+    assert.strictEqual(MarketListingPolicy.classify(craftState, dMarketItem, {
+        states: [], signals: [], supplyByItem: new Map()
+    }).action, 'list', 'one scarce D-grade recipe should be offered without existing demand');
     assert.strictEqual(
         ItemDisposition.recipeDisposition(craftState, craftState.inventory[2250], []).action,
         'npc',
@@ -66,10 +87,16 @@ async function run() {
 
     const learned = [];
     Database.fetchCharacterRecipes = () => Promise.resolve([]);
-    Database.setCharacterRecipe = (characterId, recipeId, type) => {
-        learned.push({ characterId, recipeId, type });
-        return Promise.resolve();
+    Database.learnColdRecipes = async (characterId, recipes, state) => {
+        const inventory = structuredClone(state.inventory);
+        for (const recipe of recipes) {
+            learned.push({ characterId, recipeId: recipe.recipeId, type: recipe.type });
+            inventory[recipe.recipeItemId].amount--;
+        }
+        return { coldLifeRow: { ...state, inventory, stats: { ...state.stats,
+            lastRecipeBookLearning: { learned: recipes } } } };
     };
+    LifeState.acceptLifecycleRow = state => state;
     Database.syncInventorySummary = () => Promise.resolve();
     LifeState.upsertState = (state) => Promise.resolve(state);
 
@@ -89,6 +116,8 @@ run().catch((error) => {
 }).finally(() => {
     Database.fetchCharacterRecipes = original.fetchCharacterRecipes;
     Database.setCharacterRecipe = original.setCharacterRecipe;
+    Database.learnColdRecipes = original.learnColdRecipes;
+    LifeState.acceptLifecycleRow = original.acceptLifecycleRow;
     Database.syncInventorySummary = original.syncInventorySummary;
     LifeState.upsertState = original.upsertState;
     LifeState.reset?.();

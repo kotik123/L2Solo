@@ -46,13 +46,15 @@ async function main() {
         const registry = PopulationService.startBackgroundJobRegistry();
         await new Promise((resolve) => setImmediate(resolve));
         const snapshot = BackgroundJobRegistry.snapshot();
-        assert.strictEqual(snapshot.registered, 5);
+        assert.strictEqual(snapshot.registered, 6);
         assert.strictEqual(snapshot.tickMs, 250);
         assert.strictEqual(snapshot.jobs.clan_actions.offsetMs, 0);
         assert.strictEqual(snapshot.jobs.clan_actions.intervalMs, 1000, 'clan actions must poll for backlog continuation every governor window');
         assert.strictEqual(snapshot.jobs.goal_stale_review.offsetMs, 2500);
         assert.strictEqual(snapshot.jobs.goal_warehouse_release.offsetMs, 2750);
         assert.strictEqual(snapshot.jobs.goal_market_reconcile.offsetMs, 3000);
+        assert.strictEqual(snapshot.jobs.shot_economy.offsetMs, 3250,
+            'shot production must have a separate staggered background slot');
         assert.strictEqual(snapshot.jobs.clan_founders.offsetMs, 30000);
         assert.strictEqual(actionRuns, 1, 'only the zero-offset action pass should run at startup');
         assert.strictEqual(staleRuns, 0);

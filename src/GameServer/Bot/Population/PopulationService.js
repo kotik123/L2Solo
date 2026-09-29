@@ -34,6 +34,8 @@ const PartyRecruitmentChat = invoke('GameServer/Bot/Population/ColdPartyRecruitm
 const GearAcquisitionPlanner = invoke('GameServer/Bot/AI/GearAcquisitionPlanner');
 const LevelingRoutes = invoke('GameServer/Bot/AI/LevelingRoutes');
 const ColdCraftingService = invoke('GameServer/Bot/Economy/ColdCraftingService');
+const ColdWealthCraftService = invoke('GameServer/Bot/Economy/ColdWealthCraftService');
+const ColdShotEconomyService = invoke('GameServer/Bot/Economy/ColdShotEconomyService');
 const CraftTelemetry = invoke('GameServer/Bot/Economy/CraftTelemetry');
 const BotPersona = invoke('GameServer/Bot/AI/BotPersona');
 const PersonaPartyPolicy = invoke('GameServer/Bot/Population/PersonaPartyPolicy');
@@ -1562,6 +1564,12 @@ const PopulationService = {
                 nextAtKey: 'nextMarketGoalReconcileAt',
                 run: () => this.reconcileMarketGoalBatch()
             });
+            registerGoalJob({
+                name: 'shot_economy',
+                offsetMs: baseOffsetMs + (registryTickMs * 3),
+                nextAtKey: 'nextShotEconomyAt',
+                run: () => this.reconcileShotEconomyBatch()
+            });
         }
 
         this.backgroundJobRegistry = registry;
@@ -1799,6 +1807,39 @@ const PopulationService = {
                 results,
                 continuation: Number(results.candidateCount || 0) >= batchSize || Date.now() >= deadlineAt
             }))
+        });
+    },
+
+    reconcileShotEconomyBatch() {
+        return this.runGovernedGoalBackgroundJob({
+            job: 'shot_economy',
+            runningKey: 'shotEconomyRunning',
+            nextAtKey: 'nextShotEconomyAt',
+            run: async ({ batchSize, deadlineAt }) => {
+                const selected = await ColdShotEconomyService.candidates(batchSize + 1);
+                const results = [];
+                let reviewed = 0;
+                for (const candidate of selected.slice(0, batchSize)) {
+                    if (Date.now() >= deadlineAt) break;
+                    const state = LifeState.snapshot(candidate.characterId);
+                    if (!state || state.phase !== 'cold') continue;
+                    const result = await ColdSimulationCoordinator.withEconomyState(state, async current => {
+                        const shots = await ColdShotEconomyService.review(current);
+                        const wealth = await ColdWealthCraftService.tryCraft(shots.state || current);
+                        return { ...shots, state: wealth.state || shots.state, wealthCrafted: wealth.crafted,
+                            reviewedEconomy: true };
+                    });
+                    reviewed++;
+                    if (result.crafted || (result.reviewedEconomy && ColdShotEconomyService.hasShotSurplus(result.state))) {
+                        const goal = { type: 'sell_inventory', status: 'active',
+                            plan: { expectedBenefit: 'market_sale_inventory' } };
+                        await BotAfkMarketService.reconcile(result.state, goal);
+                    }
+                    results.push(result);
+                    await new Promise((resolve) => setImmediate(resolve));
+                }
+                return { results, continuation: selected.length > reviewed || Date.now() >= deadlineAt };
+            }
         });
     },
 
@@ -3693,7 +3734,9 @@ const PopulationService = {
             if (updatedState.activity === 'crafting') {
                 return { ok: true, state: updatedState, debug: result.debug };
             }
-            return ColdMarketListingService.reconcileInventory(updatedState)
+            return ColdShotEconomyService.review(updatedState)
+                .then((shotEconomy) => ColdWealthCraftService.tryCraft(shotEconomy.state || updatedState))
+                .then((wealthCraft) => ColdMarketListingService.reconcileInventory(wealthCraft.state || updatedState))
                 .then((inventoryLifecycle) => ColdMarketListingService.resolve(inventoryLifecycle.state))
                 .then((marketLifecycle) => {
                     const completedSale = marketLifecycle.closed && marketLifecycle.reason === 'sold_out';

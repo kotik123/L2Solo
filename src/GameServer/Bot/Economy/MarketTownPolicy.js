@@ -59,6 +59,7 @@ function rankOf(item) {
     }
     const directRank = String(item?.rank || rankBySelfId.get(selfId) || 'none').toLowerCase();
     if (directRank !== 'none') return directRank;
+    if (ItemDisposition.isMarketRecipeItem(item)) return ItemDisposition.recipeProductRank(item);
     const kind = String(item?.kind || kindBySelfId.get(selfId) || '');
     if (!kind.startsWith('Other.Material')) return directRank;
     const productRanks = materialRanksBySelfId.get(selfId);

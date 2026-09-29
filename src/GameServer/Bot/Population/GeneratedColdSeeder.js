@@ -315,17 +315,17 @@ function ensureAdena(characterId, amount) {
     });
 }
 
-function ensureBaseLoadout(characterId, classId, adena, level = 1) {
+function ensureBaseLoadout(characterId, classId, adena, level = 1, starterShots = true) {
     return awardBaseGear(characterId, classId)
         .then(() => awardBaseSkills(characterId, classId))
         .then(() => awardProfileSkills(characterId, classId, level))
         .then((progression) => {
             const resolvedClassId = Number(progression?.classId || classId);
             return ensureAdena(characterId, adena)
-                .then(() => ShotStock.ensureCharacterStock(characterId, {
+                .then(() => starterShots ? ShotStock.ensureCharacterStock(characterId, {
                     classId: resolvedClassId,
                     targetAmount: ShotStock.DEFAULT_TARGET_AMOUNT
-                }))
+                }) : null)
                 .then(() => ({ classId: resolvedClassId }));
         });
 }
@@ -357,7 +357,7 @@ function ensureCharacter(username, index, base = baseForIndex(index), seedProfil
                     ? classReady.then(() => Database.updateCharacterExperience(character.id, level, exp, Number(character.sp || 0)))
                     : classReady;
             return levelReady
-                .then(() => ensureBaseLoadout(character.id, classId, adena, level))
+                .then(() => ensureBaseLoadout(character.id, classId, adena, level, false))
                 .then(() => Database.fetchCharacters(username))
                 .then((reconciledCharacters) => {
                     const reconciled = reconciledCharacters[0] || character;

@@ -140,7 +140,7 @@ try {
     // Rechecking a persisted pre-fix ask must classify demand at the corrected
     // price, otherwise the old overprice still makes its actual buyer invisible.
     const npcItem = pricingItem(178);
-    const buyer = { characterId: 2, adena: 450000, stats: {
+    const buyer = { characterId: 2, adena: 900000, stats: {
         equipmentPlan: { status: 'active', strategy: 'market', target: { selfId: 178 } }
     } };
     const decision = Listings.classify(state, {
@@ -151,7 +151,7 @@ try {
     DataCache.npcSpawns = [];
     assert.strictEqual(Pricing.npcPrice(npcItem), Infinity, 'unspawned catalog shops are not available alternatives');
     DataCache.npcSpawns = originalSpawns;
-    assert.strictEqual(Pricing.npcPrice(npcItem), 449900, 'NPC price cache must refresh when spawns reload');
+    assert.strictEqual(Pricing.npcPrice(npcItem), 899800, 'NPC price cache must refresh when spawns reload');
 
     const originalInvoke = global.invoke;
     global.invoke = (name) => {

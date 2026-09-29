@@ -185,6 +185,7 @@ class ColdSimulationCoordinator {
         });
         this.commandInflight = new Map();
         this.fencedBots = new Set();
+        this.economyBots = new Set();
         this.pauseReasons = new Set();
         this.snapshotQueue = new ColdSnapshotQueue({
             pageSize: Config.coldWorkerSnapshotPageSize || 48,
@@ -822,6 +823,7 @@ class ColdSimulationCoordinator {
     }
 
     markDirty(state, options = {}) {
+        if (this.economyBots.has(Number(state?.characterId))) return { ok: false, reason: 'economy_in_progress' };
         if (!state?.characterId || !this.worker || !this.ready) {
             return { ok: false, reason: 'worker_not_ready' };
         }
@@ -1122,6 +1124,7 @@ class ColdSimulationCoordinator {
 
     notifyState(state, options = {}) {
         if (!state) return { ok: false, reason: 'missing_state' };
+        if (this.economyBots.has(Number(state.characterId))) return { ok: false, reason: 'economy_in_progress' };
         this.fencedBots.delete(Number(state.characterId));
         return this.markDirty(state, { ...options, critical: options.critical !== false });
     }
@@ -1157,6 +1160,10 @@ class ColdSimulationCoordinator {
         const missing = [];
         const purposes = new Map();
         for (const candidate of message.payload.candidates || []) {
+            if (this.economyBots.has(Number(candidate.characterId))) {
+                missing.push({ ok: false, characterId: Number(candidate.characterId), reason: 'economy_in_progress', retryAfterMs: 1000 });
+                continue;
+            }
             const state = LifeState.cachedState(candidate.characterId);
             if (!state) {
                 missing.push({ ok: false, characterId: Number(candidate.characterId), reason: 'missing_state' });
@@ -1491,7 +1498,30 @@ class ColdSimulationCoordinator {
         }).catch((error) => this.recordError(error));
     }
 
-    async fenceBot(characterId, timeoutMs = 500) {
+    async withEconomyState(state, work) {
+        const id = Number(state.characterId);
+        if (this.economyBots.has(id) || this.commandInflight.has(id) || this.fencedBots.has(id)) {
+            return { state, reason: 'economy_busy' };
+        }
+        this.economyBots.add(id);
+        try {
+            const fence = await this.fenceBot(id, 1000, true);
+            if (!fence.ok) return { state, reason: fence.reason };
+            const latest = LifeState.snapshot(id) || state;
+            if (latest.phase !== 'cold') return { state: latest, reason: 'not_cold' };
+            const handoff = await ColdSimulationOwner.handoffToMain(latest, { allowParty: true, allowLifecycle: true });
+            if (!handoff.ok) return { state: latest, reason: handoff.reason };
+            return await work(LifeState.snapshot(id) || latest);
+        } finally {
+            this.economyBots.delete(id);
+            const latest = LifeState.snapshot(id);
+            if (latest) this.notifyState(latest, { critical: true, reason: 'economy_finished' });
+            else this.fencedBots.delete(id);
+        }
+    }
+
+    async fenceBot(characterId, timeoutMs = 500, economy = false) {
+        if (!economy && this.economyBots.has(Number(characterId))) return { ok: false, reason: 'economy_in_progress' };
         if (!this.worker || !this.ready) return { ok: true, reason: 'worker_not_ready' };
         const id = Number(characterId);
         this.fencedBots.add(id);
