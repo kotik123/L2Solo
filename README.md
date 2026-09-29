@@ -35,7 +35,7 @@ Optional but recommended for a better experience
 
 
 ## Latest updates
-
+- **2026-09-29** Market, recipes, bot shoulshots craft, paid buffs, fixes and improvements
 - **2026-09-26** Bot raid boss farm, player bot party join, SA, fixes and updates
 - **2026-09-22** Bot progression, clan party, craft, trading fixes; realistic bot and clan names
 - **2026-09-21** L2Solo client mod, server-side mod support, in-game items db
@@ -54,12 +54,12 @@ Optional but recommended for a better experience
 - **2026-08-26** Observer update, better and faster, player clan crest control, player clan goal control
 - **2026-08-25** Bot clans update follow-up, bug fixes
 - **2026-08-24** Bot clans, better cold/hot performance, bug fixes, and more
-- **2026-08-20** Loot and mob skills bug fixes, bot social graph base
-- **2026-08-19** Runtime optimization, cold bot progression bottlenecks fix, bot equipment enchantment
 
 <details>
 <summary>Earlier</summary>
 
+- **2026-08-20** Loot and mob skills bug fixes, bot social graph base
+- **2026-08-19** Runtime optimization, cold bot progression bottlenecks fix, bot equipment enchantment
 - **2026-08-18** Fixes, cold bots progression, better AI compatibility
 - **2026-08-17** Fix cold bot progression, melee and polearm attack range, raid minion party fear
 - **2026-08-16** Summoners, BD, SWS, agro skills and Observer update
@@ -278,6 +278,7 @@ it expires after 30 minutes of inactivity and resets on server restart.
 - `/invite` while targeting a bot - recruit that bot as a companion.
 - `/dismiss <name>` and `/leave` also work through the party request path.
 - `.go` to start arena PvP
+- `.buff` target a bot to ask for a paid buff service
 
 Nearby bots also react to plain chat lines such as `hi`, `follow`, `wait`, `hunt`, `heal`, and `buff`.
 
