@@ -16,6 +16,7 @@ const tests = [
 
     'tests/test_bot_warehouse_craft_chain.js',
     'tests/test_clan_goal_recovery.js',
+    'tests/test_clan_read_indexes.js',
     'tests/test_market_store_settlement_history.js',
     'tests/test_bot_market_destinations.js',
     'tests/test_market_store_history.js',

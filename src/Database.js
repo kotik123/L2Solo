@@ -1180,6 +1180,13 @@ function applySchemaMigrations() {
         symbolId INTEGER NOT NULL,
         PRIMARY KEY(characterId, slot)
     )`)]);
+    migrations.push([49, () => connection.exec(`
+        CREATE INDEX IF NOT EXISTS clan_warehouse_ledger_revision
+            ON clan_warehouse_ledger(clanId, warehouseRevision);
+        CREATE INDEX IF NOT EXISTS clan_goal_events_meaningful_recent
+            ON clan_goal_events(clanId, occurredAt DESC, id DESC)
+            WHERE eventType != 'action_succeeded';
+    `)]);
     const applied = new Set(connection.prepare('SELECT version FROM schema_migrations').all().map((row) => Number(row.version)));
     migrations.forEach(([version, apply]) => {
         if (applied.has(version)) return;

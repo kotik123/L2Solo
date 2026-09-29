@@ -568,7 +568,7 @@ function compactClanGoal(raw) {
 
 function clanOverviewQuery() {
     return Database.execute([`
-        WITH member_projection AS (
+        WITH member_projection AS MATERIALIZED (
             SELECT c.id, c.clanId, c.level, c.isOnline,
                    CASE WHEN ${CLAN_BOT_MEMBER_SQL} THEN 1 ELSE 0 END AS isBot,
                    CASE WHEN c.isOnline = 1 OR life.phase = 'hot' THEN 1 ELSE 0 END AS isOnlineNow,
